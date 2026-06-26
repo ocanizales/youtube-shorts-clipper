@@ -1,0 +1,8 @@
+# Web app deps (in addition to the root requirements.txt)
+flask
+
+# Facecam detection (split layout) and dynamic spoken-word captions:
+opencv-python        # face detection for the facecam split layout
+faster-whisper       # word-level transcription for dynamic captions
+
+# The root requirements.txt covers: yt-dlp, librosa, numpy, google-api-*

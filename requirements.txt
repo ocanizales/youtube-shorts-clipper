@@ -1,0 +1,12 @@
+# Core clipper deps
+yt-dlp                      # download YouTube videos
+librosa                    # audio energy analysis for highlight detection
+numpy                      # RMS / peak math
+
+# Only needed for --draft / --list-channels (YouTube upload)
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+
+# ffmpeg is a system binary (winget install Gyan.FFmpeg), not a pip package.
+# Optional spoken-word subtitles: pip install faster-whisper
