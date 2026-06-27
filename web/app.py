@@ -94,11 +94,12 @@ def process():
         "max_clips": max(1, min(int(request.form.get("max_clips", 5)), 20)),
         "clip_len": max(5, min(int(request.form.get("clip_len", 45)), 90)),
         "peak_pos": float(request.form.get("peak_pos", 0.65)),
-        "layout": request.form.get("layout", "fit"),
+        "layout": request.form.get("layout", "full"),
         "caption": request.form.get("caption", "").strip(),
         "cap_size": int(request.form.get("cap_size", 66)),
-        "cap_pos": request.form.get("cap_pos", "top"),
         "subtitles": request.form.get("subtitles") in ("on", "1", "true"),
+        "platform": request.form.get("platform", "youtube"),
+        "title": request.form.get("caption", "").strip() or "Highlight",
     }
     file = request.files.get("file")
     url = request.form.get("url", "").strip()

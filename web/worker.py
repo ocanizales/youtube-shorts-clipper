@@ -43,8 +43,8 @@ def process(job: dict) -> None:
             video, max_clips=opts["max_clips"], clip_len=opts["clip_len"],
             peak_pos=opts["peak_pos"], layout=opts["layout"],
             caption=opts.get("caption") or None, subs=opts.get("subtitles", False),
-            cap_size=opts.get("cap_size", 66), cap_pos=opts.get("cap_pos", "top"),
-            progress=cut)
+            cap_size=opts.get("cap_size", 66), title=opts.get("title", "Highlight"),
+            platform=opts.get("platform", "youtube"), progress=cut)
 
         db.update_job(jid, status="done", stage="Done", progress=100,
                       clips=[c.name for c in clips])

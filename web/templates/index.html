@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YouTube Shorts Clipper</title>
+<title>Shorts Clipper</title>
 <style>
   :root{
     --bg:#0d0d0f; --surface:#161618; --surface-2:#1d1d20; --line:#2a2a2e;
@@ -85,6 +85,8 @@
   .results{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:16px;margin-top:8px}
   video{width:100%;border-radius:10px;background:#000;aspect-ratio:9/16;object-fit:cover;border:1px solid var(--line)}
   .dl{display:block;text-align:center;margin-top:8px;color:#5ab0ff;font-size:14px}
+  .meta{width:100%;margin-top:8px;padding:8px;background:var(--surface-2);border:1px solid var(--line);
+        border-radius:8px;color:var(--text);font-size:12px;font-family:inherit;resize:vertical}
   a{color:#5ab0ff}
 </style>
 </head>
@@ -92,7 +94,7 @@
 <a href="#main" class="sr-only">Skip to main content</a>
 <div class="wrap">
   <header>
-    <h1>YouTube Shorts Clipper<span class="bar" aria-hidden="true"></span></h1>
+    <h1>Shorts Clipper<span class="bar" aria-hidden="true"></span></h1>
   </header>
 
   <main id="main">
@@ -155,9 +157,9 @@
               <input type="number" id="clip_len" name="clip_len" value="45" min="10" max="90"></div>
             <div><label for="layout">Layout</label>
               <select id="layout" name="layout">
-                <option value="fit">Fit (whole frame)</option>
-                <option value="crop">Crop (tracks action)</option>
-                <option value="split">Split (facecam + gameplay)</option>
+                <option value="full">Full video</option>
+                <option value="crop">Motion track</option>
+                <option value="split">Split screen (facecam)</option>
               </select></div>
             <div><label for="peak_pos">Build-up: <span id="ppv">65</span>%</label>
               <input type="range" id="peak_pos" name="peak_pos" min="40" max="85" value="65"
@@ -172,14 +174,18 @@
           <div class="grid">
             <div><label for="cap_size">Caption size</label>
               <input type="number" id="cap_size" name="cap_size" value="66" min="24" max="140"></div>
-            <div><label for="cap_pos">Caption position</label>
-              <select id="cap_pos" name="cap_pos">
-                <option value="top">Top</option><option value="middle">Middle</option>
-                <option value="bottom">Bottom</option>
+            <div><label for="platform">Title/caption for</label>
+              <select id="platform" name="platform">
+                <option value="youtube">YouTube</option>
+                <option value="tiktok">TikTok</option>
+                <option value="both">Both</option>
               </select></div>
           </div>
           <label class="checkbox"><input type="checkbox" id="subtitles" name="subtitles">
             Dynamic spoken-word captions (auto-transcribed)</label>
+          <!-- Caption position is set automatically by layout: split = bottom of the
+               facecam, full video = right under the video. Skipped if the source is
+               already captioned. -->
         </fieldset>
 
         <button type="submit" id="go" class="generate">Generate clips</button>
@@ -271,7 +277,13 @@ function poll(id){
         const a = document.createElement('a');
         a.className='dl'; a.href='/clips/'+name; a.download='';
         a.textContent = `Download clip ${i+1}`;
-        d.append(v, a); $('results').appendChild(d);
+        // Show the generated title/caption from the .txt sidecar (same name, .txt)
+        const meta = document.createElement('textarea');
+        meta.className='meta'; meta.readOnly=true; meta.rows=5;
+        meta.setAttribute('aria-label', `Title and caption for clip ${i+1}`);
+        fetch('/clips/'+name.replace(/\.mp4$/, '.txt'))
+          .then(r => r.ok ? r.text() : '').then(txt => { meta.value = txt.trim(); });
+        d.append(v, a, meta); $('results').appendChild(d);
       });
       $('stage').textContent = `Done. ${ (s.clips||[]).length } clips ready.`;
       $('results').focus();

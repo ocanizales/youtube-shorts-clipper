@@ -200,7 +200,28 @@ def _esc(text: str) -> str:
 SPLIT_TOP_FRAC = 0.42  # facecam occupies the top portion of the 9:16 canvas
 
 
-def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_pos) -> str:
+def full_video_height(dims) -> int:
+    """Height (px) of the source frame when scaled to the full 1080 width."""
+    src_w, src_h = dims
+    return int(round(W * src_h / src_w / 2) * 2)  # even number for yuv420p
+
+
+def caption_anchor(layout, dims) -> tuple[int, int]:
+    """
+    Where captions belong for each layout, as (ASS alignment, margin px).
+    Alignment 8 = top-anchored (margin measured from the top),
+    Alignment 2 = bottom-anchored (margin measured from the bottom).
+    """
+    if layout == "split":      # only at the BOTTOM of the facecam (top) panel
+        return 8, int(H * SPLIT_TOP_FRAC * 0.88)
+    if layout == "full":       # right UNDER the video so viewers don't look far down
+        return 8, full_video_height(dims) + 24
+    if layout == "fit":        # on the bottom blurred bar, clear of gameplay
+        return 2, int(H * 0.07)
+    return 2, int(H * 0.24)    # crop: lower third, above the bottom HUD
+
+
+def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin) -> str:
     src_w, src_h = dims
     if layout == "split" and facecam:        # facecam on top, gameplay on bottom
         fx, fy, fw, fh = facecam
@@ -210,7 +231,12 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_pos
               f"scale={W}:{top_h}:force_original_aspect_ratio=increase,crop={W}:{top_h}[cam];"
               f"[b]scale={W}:{bot_h}:force_original_aspect_ratio=increase,crop={W}:{bot_h}[game];"
               f"[cam][game]vstack=inputs=2")
-    elif layout == "fit":                    # whole frame + blurred bars
+    elif layout == "full":                   # WHOLE video at the top, blurred fill below
+        vf = (f"split=2[bg][fg];"
+              f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=22:4[b];"
+              f"[fg]scale={W}:-2[v];"
+              f"[b][v]overlay=(W-w)/2:0")    # video pinned to the top edge
+    elif layout == "fit":                    # whole frame centered + blurred bars
         vf = (f"split[bg][fg];[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
               f"crop={W}:{H},boxblur=22:4[b];"
               f"[fg]scale={W}:{H}:force_original_aspect_ratio=decrease[f];"
@@ -221,8 +247,8 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_pos
     if ass_path:                             # dynamic word-by-word captions
         p = str(ass_path).replace("\\", "/").replace(":", R"\:")
         vf += f",ass='{p}'"
-    if caption:                              # static headline banner
-        y = {"top": "140", "middle": "(h-text_h)/2", "bottom": "h-text_h-200"}[cap_pos]
+    if caption:                              # static headline, placed by layout anchor
+        y = f"{cap_margin}" if cap_an in (7, 8, 9) else f"h-text_h-{cap_margin}"
         vf += (f",drawtext=fontfile='{FONT}':text='{_esc(caption)}':fontcolor=white:"
                f"fontsize={cap_size}:borderw=5:bordercolor=black@0.9:x=(w-text_w)/2:y={y}")
     return vf
@@ -236,18 +262,19 @@ def _ass_ts(s: float) -> str:
     return f"{h:d}:{m:02d}:{sec:02d}.{int((s % 1) * 100):02d}"
 
 
-def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int) -> Path | None:
+def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int):
     """
     Transcribe spoken words and write an .ass with word-by-word reveal where the
-    active word is highlighted (the modern animated-caption look). Returns the
-    .ass path, or None if faster-whisper isn't installed / there's no speech.
+    active word is highlighted (the modern animated-caption look). Returns
+    (ass_path, hook) where hook is the first spoken phrase (used for the title),
+    or (None, None) if faster-whisper isn't installed / there's no speech.
     """
     global _WHISPER
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         print("[subs] faster-whisper missing — run: pip install faster-whisper")
-        return None
+        return None, None
     if _WHISPER is None:  # cached across clips; CPU int8 avoids a CUDA/cuBLAS dependency
         _WHISPER = WhisperModel("base", device="cpu", compute_type="int8")
 
@@ -255,7 +282,7 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int) -> 
     words = [(w.word.strip(), w.start, w.end)
              for seg in segments for w in (seg.words or []) if w.word.strip()]
     if not words:
-        return None
+        return None, None
 
     # group into short phrases (max 5 words, split on >0.6s gaps)
     phrases, cur = [], []
@@ -291,7 +318,8 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int) -> 
 
     ass = clip.with_suffix(".ass")
     ass.write_text(head + "\n".join(lines), encoding="utf-8")
-    return ass
+    hook = " ".join(w for w, _, _ in phrases[0][:8])   # first phrase -> title hook
+    return ass, hook
 
 
 def detect_facecam(video: Path, start: float, dur: int, src_w: int, src_h: int):
@@ -336,54 +364,115 @@ def detect_facecam(video: Path, start: float, dur: int, src_w: int, src_h: int):
     return int(x), int(y), int(bw), int(bh)
 
 
+def has_existing_captions(video: Path, start: float, dur: int, dims) -> bool:
+    """
+    True if the source already has captions, so we don't add a duplicate layer:
+      1) a real subtitle stream (reliable), or
+      2) burned-in text in the lower-centre band (best-effort, via opencv).
+    """
+    probe = _FFMPEG.replace("ffmpeg.exe", "ffprobe.exe") if _FFMPEG_DIR else "ffprobe"
+    subs = subprocess.run([probe, "-v", "error", "-select_streams", "s",
+                           "-show_entries", "stream=index", "-of", "csv=p=0", str(video)],
+                          capture_output=True, text=True).stdout.strip()
+    if subs:
+        return True
+    try:
+        import cv2
+    except ImportError:
+        return False
+    src_w, src_h = dims
+    dw, dh = 480, int(480 * src_h / src_w)
+    raw = subprocess.run(
+        [_FFMPEG, "-ss", str(start), "-i", str(video), "-t", str(dur),
+         "-vf", f"fps=1,scale={dw}:{dh}", "-pix_fmt", "gray", "-f", "rawvideo", "-"],
+        capture_output=True).stdout
+    nf = len(raw) // (dw * dh)
+    if nf < 3:
+        return False
+    frames = np.frombuffer(raw[:nf * dw * dh], np.uint8).reshape(nf, dh, dw)
+    band = frames[:, int(dh * 0.30):, :]          # captions live anywhere in the lower 70%
+    hits = 0
+    for f in band:
+        grad = cv2.morphologyEx(f, cv2.MORPH_GRADIENT, np.ones((2, 2), np.uint8))
+        _, th = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # join characters into word/line blobs, then look for wide centred text lines
+        joined = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((3, 15), np.uint8))
+        cnts, _ = cv2.findContours(joined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for c in cnts:
+            x, _, w, h = cv2.boundingRect(c)
+            cx = x + w / 2
+            if w > dw * 0.25 and 6 < h < dh * 0.18 and w / h > 4 and 0.2 < cx / dw < 0.8:
+                hits += 1
+                break
+    return hits >= max(2, int(nf * 0.6))           # text band present in most frames
+
+
+def _hashtags(platform: str) -> str:
+    yt = "#Shorts #LeagueOfLegends #LoL #Gaming"
+    tk = "#fyp #lol #leagueoflegends #gaming #clips"
+    return {"youtube": yt, "tiktok": tk, "both": f"{yt}\n{tk}"}[platform]
+
+
+def write_metadata(clip: Path, title_base: str, idx: int, platform: str, hook: str | None):
+    """Write a sidecar .txt with a ready-to-paste title + caption for the platform(s)."""
+    headline = (hook or title_base).strip().rstrip(".!?")
+    title = f"{headline} 🔥 (#{idx})"
+    body = (f"TITLE:\n{title}\n\nCAPTION:\n{headline} — League of Legends highlight.\n"
+            f"{_hashtags(platform)}\n")
+    clip.with_suffix(".txt").write_text(body, encoding="utf-8")
+
+
 def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
-             cap_size=66, cap_pos="top", peak_pos=0.65, facecam_override=None) -> Path:
+             cap_size=66, peak_pos=0.65, facecam_override=None,
+             title="Highlight", platform="youtube") -> Path:
     out = CLIPS_DIR / f"short_{idx:02d}_{int(start)}s.mp4"
     src_w, src_h = dims
 
     facecam = None
     if layout == "split":
         facecam = facecam_override or detect_facecam(video, start, dur, src_w, src_h)
-        if not facecam:
-            print(f"[clip {idx}] no facecam detected; falling back to fit layout")
-            layout = "fit"
+        if not facecam:                          # no face -> show the whole video instead
+            print(f"[clip {idx}] no facecam detected; falling back to full-video layout")
+            layout = "full"
     crop_x = focus_x(video, start, dur, src_w, src_h, spike_frac=peak_pos) if layout == "crop" else 0
 
-    ass_path = None
+    # Don't add captions if the source is already captioned (avoids duplicates).
+    if subs and has_existing_captions(video, start, dur, dims):
+        print(f"[clip {idx}] source already has captions; skipping added captions")
+        subs = False
+
+    ass_path, hook = None, None
     if subs:
         tmp = CLIPS_DIR / f".raw_{idx}.mp4"
         ff("-y", "-ss", str(start), "-i", str(video), "-t", str(dur), "-c", "copy", str(tmp))
-        # place captions in each layout's safe zone (off faces and key gameplay)
-        if layout == "split":
-            top_h = int(H * SPLIT_TOP_FRAC)
-            an, margin = 8, int(top_h * 0.88)   # bottom of facecam, below the face
-        elif layout == "fit":
-            an, margin = 2, int(H * 0.07)        # on the bottom blurred bar, off gameplay
-        else:                                    # crop: lower third, above the bottom HUD
-            an, margin = 2, int(H * 0.24)
-        ass_path = make_dynamic_captions(tmp, an, margin, max(48, cap_size))
+        an, margin = caption_anchor(layout, dims)     # placement is decided by layout
+        ass_path, hook = make_dynamic_captions(tmp, an, margin, max(48, cap_size))
         tmp.unlink(missing_ok=True)
 
+    cap_an, cap_margin = caption_anchor(layout, dims)
     ff("-y", "-ss", str(start), "-i", str(video), "-t", str(dur),
-       "-vf", build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_pos),
+       "-vf", build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin),
        *_ENC, "-pix_fmt", "yuv420p",
        "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k",
        "-movflags", "+faststart", str(out))
     if ass_path:
         ass_path.unlink(missing_ok=True)
+    write_metadata(out, title, idx, platform, hook)   # title + caption sidecar
     print(f"[clip] {out}  ({out.stat().st_size // 1_000_000} MB)")
     return out
 
 
-def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="fit",
-               caption=None, subs=False, cap_size=66, cap_pos="top", progress=None) -> list[Path]:
+def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="full",
+               caption=None, subs=False, cap_size=66, title="Highlight",
+               platform="youtube", progress=None) -> list[Path]:
     """Full local pipeline on a downloaded video. Shared by CLI + web."""
     dims = _dims(video)
     moments = find_hype_moments(video, clip_len, max_clips, peak_pos)
     clips = []
     for i, t in enumerate(moments, 1):
-        clips.append(cut_clip(video, t, clip_len, i, layout, caption, subs,
-                              dims, cap_size, cap_pos, peak_pos))
+        clips.append(cut_clip(video, t, clip_len, i, layout, caption, subs, dims,
+                              cap_size=cap_size, peak_pos=peak_pos,
+                              title=title, platform=platform))
         if progress:
             progress(i, len(moments))
     return clips
@@ -441,16 +530,17 @@ def main():
     p.add_argument("--clip-len", type=int, default=45, help="seconds per clip (45)")
     p.add_argument("--peak-pos", type=float, default=0.65,
                    help="spike position 0-1; higher = longer build-up (0.65)")
-    p.add_argument("--layout", choices=["crop", "fit", "split"], default="fit",
-                   help="fit=whole frame+blurred bars (default); crop=motion-tracked zoom; "
-                        "split=facecam on top, gameplay on bottom (auto-detects facecam)")
+    p.add_argument("--layout", choices=["crop", "full", "split"], default="full",
+                   help="full=whole video, captions under it (default); crop=motion-tracked "
+                        "zoom; split=facecam on top + gameplay on bottom (auto-detects facecam)")
     p.add_argument("--caption", help="static headline text burned onto every clip")
     p.add_argument("--cap-size", type=int, default=66, help="caption font size (66)")
-    p.add_argument("--cap-pos", choices=["top", "middle", "bottom"], default="top",
-                   help="static caption position (top)")
     p.add_argument("--subtitles", action="store_true",
-                   help="dynamic word-by-word captions from speech (needs faster-whisper)")
-    p.add_argument("--title", default="LoL Highlight", help="base title for --draft")
+                   help="dynamic word-by-word captions from speech (needs faster-whisper); "
+                        "auto-skipped if the source is already captioned")
+    p.add_argument("--platform", choices=["youtube", "tiktok", "both"], default="youtube",
+                   help="platform the generated title/caption sidecar targets (youtube)")
+    p.add_argument("--title", default="LoL Highlight", help="base title for clips and --draft")
     p.add_argument("--draft", action="store_true", help="ALSO upload as PRIVATE drafts")
     p.add_argument("--list-channels", action="store_true",
                    help="show which channel --draft would use, then exit")
@@ -465,7 +555,8 @@ def main():
     video = download_video(a.url)
     clips = make_clips(video, max_clips=a.max_clips, clip_len=a.clip_len,
                        peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
-                       subs=a.subtitles, cap_size=a.cap_size, cap_pos=a.cap_pos)
+                       subs=a.subtitles, cap_size=a.cap_size,
+                       title=a.title, platform=a.platform)
 
     print(f"\n[done] {len(clips)} clips in ./{CLIPS_DIR}/")
     if a.draft:
