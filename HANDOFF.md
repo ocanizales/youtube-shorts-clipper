@@ -2,6 +2,9 @@
 _Last updated: 2026-07-02 (continuity-protocol setup). Update me before every session end._
 
 ## Current state
+- **2026-07-05:** added `deploy/` (Linux `setup.sh` + optional
+  `shorts-clipper.service`) for Ubuntu VPS deployment via
+  `ocanizales/vps-setup`. Uploads need `client_secret_*.json` scp'd by hand.
 - Working tree clean. Last commit: full-video layout, layout-aware captions,
   and per-platform metadata (2026-06-27).
 - Web app (Flask :5000 via `serve.py`, which also spawns `web/worker.py`).

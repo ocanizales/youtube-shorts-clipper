@@ -1,0 +1,18 @@
+# systemd unit template for the shorts-clipper web app (optional — the CLI
+# path needs no service). __USER__ / __WORKDIR__ are substituted at install
+# time by vps-setup/bootstrap.sh, or by hand with sed (see other repos).
+[Unit]
+Description=youtube-shorts-clipper web app + worker — localhost:5000
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__WORKDIR__
+ExecStart=__WORKDIR__/.venv/bin/python serve.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
