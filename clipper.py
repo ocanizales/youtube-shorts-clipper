@@ -18,8 +18,22 @@ import numpy as np
 
 DOWNLOADS_DIR = Path("downloads")
 CLIPS_DIR = Path("clips")
-FONT = R"C\:/Windows/Fonts/arialbd.ttf"  # drawtext needs the drive colon escaped
 W, H = 1080, 1920
+
+
+def _resolve_font() -> str:
+    """First bold TTF that exists, as a drawtext-safe path (colon escaped).
+    Windows Arial when present; else the Linux DejaVu/Liberation bolds on the VPS."""
+    candidates = [
+        R"C:/Windows/Fonts/arialbd.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+    path = next((c for c in candidates if os.path.exists(c)), candidates[1])
+    return path.replace("\\", "/").replace(":", R"\:")  # drawtext escapes the drive colon
+
+
+FONT = _resolve_font()
 # Always grab the best video up to 1080p, ANY codec (1080p on YouTube is usually
 # VP9/webm, not mp4 — restricting to mp4 silently drops you to 720p or lower).
 FMT = "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b"
