@@ -9,6 +9,7 @@ import argparse
 import os
 import pickle
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,29 @@ def ff(*args):
     subprocess.run([_FFMPEG, *args], capture_output=True, check=True)
 
 
+# ── yt-dlp discovery ─────────────────────────────────────────────────────────
+def _resolve_ytdlp() -> str:
+    """yt-dlp is installed in this venv, but the venv's bin isn't on PATH when
+    the interpreter is invoked directly (dashboard/systemd do exactly that) —
+    prefer the copy sitting next to the running python, else fall back to PATH."""
+    for name in ("yt-dlp", "yt-dlp.exe"):
+        sibling = Path(sys.executable).with_name(name)
+        if sibling.exists():
+            return str(sibling)
+    return "yt-dlp"
+
+
+def _js_runtime_args() -> list[str]:
+    """YouTube signature solving needs a JS runtime + the yt-dlp-ejs solver
+    (in requirements). node isn't on the dashboard's stripped PATH, so pass
+    its location explicitly; without it formats go missing and 1080p regresses."""
+    node = shutil.which("node") or str(Path.home() / ".local" / "bin" / "node")
+    return ["--js-runtimes", f"node:{node}"] if os.path.exists(node) else []
+
+
+_YTDLP = [_resolve_ytdlp(), *_js_runtime_args()]
+
+
 # ── 1. download (with progress callback) ─────────────────────────────────────
 _PCT = re.compile(r"(\d{1,3}\.\d)%")
 
@@ -96,14 +120,14 @@ def _find_media(vid: str) -> Path | None:
 
 def download_video(url: str, on_progress=None) -> Path:
     """Download the best video+audio up to 1080p (any container), merged."""
-    vid = subprocess.run(["yt-dlp", "--no-playlist", "--print", "id", url],
+    vid = subprocess.run([*_YTDLP, "--no-playlist", "--print", "id", url],
                          capture_output=True, text=True, check=True).stdout.strip()
     cached = _find_media(vid)
     if cached:
         print(f"[download] reusing {cached}")
         return cached
 
-    cmd = ["yt-dlp", "--no-playlist", "-N", "8", "--newline", "-f", FMT,
+    cmd = [*_YTDLP, "--no-playlist", "-N", "8", "--newline", "-f", FMT,
            "-S", FMT_SORT, "--merge-output-format", "mp4",
            "-o", str(DOWNLOADS_DIR / f"{vid}.%(ext)s")]
     if _FFMPEG_DIR:

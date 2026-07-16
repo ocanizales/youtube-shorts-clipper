@@ -1,5 +1,6 @@
 # Core clipper deps
 yt-dlp                      # download YouTube videos
+yt-dlp-ejs                  # JS challenge solver — without it YouTube hides formats (needs node/deno)
 librosa                    # audio energy analysis for highlight detection
 numpy                      # RMS / peak math
 

@@ -1,5 +1,5 @@
 # PROJECT_MAP — youtube-shorts-clipper
-_Generated 2026-07-15 by scripts/build_memory.py — do not edit by hand._
+_Generated 2026-07-16 by scripts/build_memory.py — do not edit by hand._
 
 ## clipper.py
   - _LoL YouTube Shorts Clipper — turn a YouTube VOD into 9:16 highlight clips._

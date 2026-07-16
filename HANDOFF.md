@@ -1,7 +1,13 @@
 # HANDOFF — youtube-shorts-clipper
-_Last updated: 2026-07-02 (continuity-protocol setup). Update me before every session end._
+_Last updated: 2026-07-16 (yt-dlp resolution fix). Update me before every session end._
 
 ## Current state
+- **2026-07-16:** fixed `FileNotFoundError: 'yt-dlp'` when launched from
+  project-dashboard: clipper now resolves yt-dlp next to `sys.executable`
+  (venv bin isn't on PATH when the venv python is invoked directly) and passes
+  `--js-runtimes node:~/.local/bin/node`. Installed `yt-dlp-ejs` in the venv —
+  without it YouTube signature solving fails and 1080p formats go missing
+  (would violate the 1080p hard rule). Verified format list shows 1080p again.
 - **2026-07-05:** added `deploy/` (Linux `setup.sh` + optional
   `shorts-clipper.service`) for Ubuntu VPS deployment via
   `ocanizales/vps-setup`. Uploads need `client_secret_*.json` scp'd by hand.
