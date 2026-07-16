@@ -1,7 +1,19 @@
 # HANDOFF — youtube-shorts-clipper
-_Last updated: 2026-07-16 (yt-dlp resolution fix). Update me before every session end._
+_Last updated: 2026-07-16 (zoom layout). Update me before every session end._
 
 ## Current state
+- **2026-07-16 (zoom layout):** new `--layout zoom`, the Korean solo-queue Short
+  look the user referenced (youtube.com/shorts/l6lhaJ5Sh4Q): black caption bar on
+  top (captions render inside it), ~1.8x motion-tracked punch-in of the playfield
+  (source minus its HUD) filling the middle edge-to-edge (no blur), and the
+  source's own HUD strip rescaled full-width as a bottom band. Band plan lives in
+  `zoom_geometry()` (knobs: `ZOOM_TOP_FRAC`, `ZOOM_HUD_FRAC`); `focus_x` is passed
+  zoom's narrower window so tracking punches toward the fight. Verified with a
+  synthetic magenta-HUD testsrc (bands pixel-exact: 202/1602/116 at 1080x1920) and
+  a real 2x30s VOD render. **Gotcha found:** project-dashboard's `/api/clips/new`
+  has a server-side layout allow-list that silently coerces unknown layouts to
+  "full" — the first "zoom" render actually rendered full until app.py's tuple
+  (line ~1610) gained "zoom"; dashboard dropdown now has "Zoom · stacked HUD".
 - **2026-07-16:** fixed `FileNotFoundError: 'yt-dlp'` when launched from
   project-dashboard: clipper now resolves yt-dlp next to `sys.executable`
   (venv bin isn't on PATH when the venv python is invoked directly) and passes

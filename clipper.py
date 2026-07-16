@@ -236,6 +236,31 @@ def _esc(text: str) -> str:
 
 
 SPLIT_TOP_FRAC = 0.42  # facecam occupies the top portion of the 9:16 canvas
+ZOOM_TOP_FRAC  = 0.105  # zoom: black caption bar height (fraction of the 9:16 canvas)
+ZOOM_HUD_FRAC  = 0.19   # zoom: bottom slice of the SOURCE treated as the game HUD strip
+
+
+def _even(v) -> int:
+    return int(round(v / 2) * 2)  # yuv420p needs even dimensions
+
+
+def zoom_geometry(dims) -> tuple[int, int, int, int, int, int]:
+    """
+    Band plan for the 'zoom' layout (the Korean solo-queue Short look):
+    [black caption bar | punched-in playfield | game HUD strip], all full width,
+    no blur. The playfield (source minus its HUD) is cropped to the window width
+    that exactly fills the middle band when scaled to 1080 wide — that same width
+    is what sets the punch-in (~1.8x on 16:9 sources).
+    Returns (hud_src_h, play_h, top_bar, hud_out_h, mid_h, crop_w).
+    """
+    src_w, src_h = dims
+    hud_src_h = _even(src_h * ZOOM_HUD_FRAC)   # HUD strip height in the source
+    play_h    = src_h - hud_src_h              # playfield height in the source
+    top_bar   = _even(H * ZOOM_TOP_FRAC)       # black caption bar (output px)
+    hud_out_h = _even(hud_src_h * W / src_w)   # HUD scaled to the full output width
+    mid_h     = H - top_bar - hud_out_h        # playfield band (output px)
+    crop_w    = min(_even(play_h * W / mid_h), src_w)
+    return hud_src_h, play_h, top_bar, hud_out_h, mid_h, crop_w
 
 
 def full_video_height(dims) -> int:
@@ -256,6 +281,8 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
         return 8, (H + full_video_height(dims)) // 2 + 24
     if layout == "fit":        # on the bottom blurred bar, clear of gameplay
         return 2, int(H * 0.07)
+    if layout == "zoom":       # inside the black caption bar above the playfield
+        return 8, max(24, int(H * ZOOM_TOP_FRAC * 0.30))
     return 2, int(H * 0.24)    # crop: lower third, above the bottom HUD
 
 
@@ -279,6 +306,13 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an,
               f"crop={W}:{H},boxblur=22:4[b];"
               f"[fg]scale={W}:{H}:force_original_aspect_ratio=decrease[f];"
               f"[b][f]overlay=(W-w)/2:(H-h)/2")
+    elif layout == "zoom":                   # punched-in playfield + game HUD re-stacked below
+        _, play_h, top_bar, hud_out_h, mid_h, cw = zoom_geometry(dims)
+        hud_src_h = src_h - play_h
+        vf = (f"split=2[pf][hs];"
+              f"[pf]crop={cw}:{play_h}:{crop_x}:0,scale={W}:{mid_h}[game];"
+              f"[hs]crop={src_w}:{hud_src_h}:0:{play_h},scale={W}:{hud_out_h}[hud];"
+              f"[game][hud]vstack=inputs=2,pad={W}:{H}:0:{top_bar}:black")
     else:                                    # motion-tracked 9:16 crop
         cw = min(int(src_h * 9 / 16), src_w)
         vf = f"crop={cw}:{src_h}:{crop_x}:0,scale={W}:{H}"
@@ -542,7 +576,10 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         if not facecam:                          # no face -> show the whole video instead
             print(f"[clip {idx}] no facecam detected; falling back to full-video layout")
             layout = "full"
-    crop_x = focus_x(video, start, dur, src_w, src_h, spike_frac=peak_pos) if layout == "crop" else 0
+    crop_x = 0
+    if layout in ("crop", "zoom"):           # zoom tracks with its own (narrower) window
+        zw = zoom_geometry(dims)[-1] if layout == "zoom" else None
+        crop_x = focus_x(video, start, dur, src_w, src_h, crop_w=zw, spike_frac=peak_pos)
 
     # Don't add captions if the source is already captioned (avoids duplicates).
     if subs and has_existing_captions(video, start, dur, dims):
@@ -641,9 +678,11 @@ def main():
     p.add_argument("--clip-len", type=int, default=45, help="seconds per clip (45)")
     p.add_argument("--peak-pos", type=float, default=0.65,
                    help="spike position 0-1; higher = longer build-up (0.65)")
-    p.add_argument("--layout", choices=["crop", "full", "split"], default="full",
+    p.add_argument("--layout", choices=["crop", "full", "split", "zoom"], default="full",
                    help="full=whole video, captions under it (default); crop=motion-tracked "
-                        "zoom; split=facecam on top + gameplay on bottom (auto-detects facecam)")
+                        "zoom; split=facecam on top + gameplay on bottom (auto-detects facecam); "
+                        "zoom=punched-in playfield with the game HUD re-stacked at the bottom "
+                        "and a black caption bar on top")
     p.add_argument("--caption", help="static headline text burned onto every clip")
     p.add_argument("--cap-size", type=int, default=66, help="caption font size (66)")
     p.add_argument("--subtitles", action="store_true",
