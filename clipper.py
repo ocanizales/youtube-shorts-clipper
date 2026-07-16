@@ -304,15 +304,16 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int):
     """
     Transcribe spoken words and write an .ass with word-by-word reveal where the
     active word is highlighted (the modern animated-caption look). Returns
-    (ass_path, hook) where hook is the first spoken phrase (used for the title),
-    or (None, None) if faster-whisper isn't installed / there's no speech.
+    (ass_path, hook, transcript) where hook is the first spoken phrase (used for
+    the title) and transcript is the full spoken text (fed to AI metadata), or
+    (None, None, None) if faster-whisper isn't installed / there's no speech.
     """
     global _WHISPER
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         print("[subs] faster-whisper missing — run: pip install faster-whisper")
-        return None, None
+        return None, None, None
     if _WHISPER is None:  # cached across clips; CPU int8 avoids a CUDA/cuBLAS dependency
         _WHISPER = WhisperModel("base", device="cpu", compute_type="int8")
 
@@ -320,7 +321,7 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int):
     words = [(w.word.strip(), w.start, w.end)
              for seg in segments for w in (seg.words or []) if w.word.strip()]
     if not words:
-        return None, None
+        return None, None, None
 
     # group into short phrases (max 5 words, split on >0.6s gaps)
     phrases, cur = [], []
@@ -357,7 +358,8 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int):
     ass = clip.with_suffix(".ass")
     ass.write_text(head + "\n".join(lines), encoding="utf-8")
     hook = " ".join(w for w, _, _ in phrases[0][:8])   # first phrase -> title hook
-    return ass, hook
+    transcript = " ".join(w for w, _, _ in words)
+    return ass, hook, transcript
 
 
 def detect_facecam(video: Path, start: float, dur: int, src_w: int, src_h: int):
@@ -451,18 +453,86 @@ def _hashtags(platform: str) -> str:
     return {"youtube": yt, "tiktok": tk, "both": f"{yt}\n{tk}"}[platform]
 
 
-def write_metadata(clip: Path, title_base: str, idx: int, platform: str, hook: str | None):
-    """Write a sidecar .txt with a ready-to-paste title + caption for the platform(s)."""
-    headline = (hook or title_base).strip().rstrip(".!?")
-    title = f"{headline} 🔥 (#{idx})"
-    body = (f"TITLE:\n{title}\n\nCAPTION:\n{headline} — League of Legends highlight.\n"
-            f"{_hashtags(platform)}\n")
+# ── AI metadata from the clip transcript (idea from MoneyPrinter's gpt.py) ───
+# llama3.2:3b: small + non-thinking on purpose — runs in ~10s per clip on this
+# CPU box, where the 9b thinking models take minutes and stall the render loop.
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+
+
+def _ollama_metadata(transcript: str, idx: int) -> dict | None:
+    """Title/description/tags for one clip via the local Ollama instance.
+    Strictly best-effort: any failure (Ollama down, bad JSON, empty title)
+    returns None and callers fall back to the hook-based title."""
+    import json
+    import urllib.request
+    prompt = (
+        "You write YouTube Shorts metadata for League of Legends esports "
+        "highlight clips. Spoken commentary from this clip:\n"
+        f'"{transcript[:1200]}"\n\n'
+        'Reply with JSON only, exactly: {"title": "...", "description": "...", '
+        '"hashtags": ["...", "..."]}\n'
+        "- title: catchy, under 70 characters, no emoji, faithful to the commentary\n"
+        "- description: 1-2 sentences\n"
+        "- hashtags: 4-6 single words, no # symbol")
+    body = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False,
+            "format": "json", "options": {"temperature": 0.4, "num_predict": 250}}
+    try:
+        req = urllib.request.Request(
+            f"{OLLAMA_HOST}/api/generate", data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            meta = json.loads(json.load(r)["response"])
+        title = str(meta.get("title", "")).strip().strip('"')
+        desc = str(meta.get("description", "")).strip()
+        tags = [re.sub(r"\W", "", str(t)) for t in meta.get("hashtags", [])]
+        tags = [t for t in tags if t][:6]
+        if not title:
+            return None
+        print(f"[meta {idx}] AI title: {title}")
+        return {"title": title[:90], "description": desc[:400], "tags": tags}
+    except Exception as ex:
+        print(f"[meta {idx}] Ollama unavailable ({ex.__class__.__name__}) — using hook title")
+        return None
+
+
+def write_metadata(clip: Path, title_base: str, idx: int, platform: str,
+                   hook: str | None, meta: dict | None = None):
+    """Write a sidecar .txt with a ready-to-paste title + caption for the
+    platform(s). TITLE stays the first section — the dashboard reads it.
+    With AI meta, add a TAGS section that --draft feeds to the YouTube API."""
+    if meta:
+        title = f"{meta['title']} (#{idx})"
+        body = (f"TITLE:\n{title}\n\nCAPTION:\n{meta['description']}\n"
+                f"{_hashtags(platform)}\n\nTAGS:\n{', '.join(meta['tags'])}\n")
+    else:
+        headline = (hook or title_base).strip().rstrip(".!?")
+        title = f"{headline} 🔥 (#{idx})"
+        body = (f"TITLE:\n{title}\n\nCAPTION:\n{headline} — League of Legends highlight.\n"
+                f"{_hashtags(platform)}\n")
     clip.with_suffix(".txt").write_text(body, encoding="utf-8")
+
+
+def _read_sidecar(clip: Path) -> dict:
+    """Parse a sidecar .txt back into {'TITLE': ..., 'CAPTION': ..., 'TAGS': ...}
+    so --draft uploads reuse the (possibly AI-written) metadata."""
+    out, cur = {}, None
+    try:
+        for ln in clip.with_suffix(".txt").read_text(encoding="utf-8").splitlines():
+            head = ln.strip().rstrip(":").upper()
+            if ln.strip().endswith(":") and head in ("TITLE", "CAPTION", "TAGS"):
+                cur = head
+                out[cur] = ""
+            elif cur is not None:
+                out[cur] = f"{out[cur]}\n{ln}".strip()
+    except OSError:
+        pass
+    return out
 
 
 def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
              cap_size=66, peak_pos=0.65, facecam_override=None,
-             title="Highlight", platform="youtube") -> Path:
+             title="Highlight", platform="youtube", ai_meta=True) -> Path:
     out = CLIPS_DIR / f"short_{idx:02d}_{int(start)}s.mp4"
     src_w, src_h = dims
 
@@ -479,12 +549,12 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         print(f"[clip {idx}] source already has captions; skipping added captions")
         subs = False
 
-    ass_path, hook = None, None
+    ass_path, hook, transcript = None, None, None
     if subs:
         tmp = CLIPS_DIR / f".raw_{idx}.mp4"
         ff("-y", "-ss", str(start), "-i", str(video), "-t", str(dur), "-c", "copy", str(tmp))
         an, margin = caption_anchor(layout, dims)     # placement is decided by layout
-        ass_path, hook = make_dynamic_captions(tmp, an, margin, max(48, cap_size))
+        ass_path, hook, transcript = make_dynamic_captions(tmp, an, margin, max(48, cap_size))
         tmp.unlink(missing_ok=True)
 
     cap_an, cap_margin = caption_anchor(layout, dims)
@@ -495,14 +565,15 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
        "-movflags", "+faststart", str(out))
     if ass_path:
         ass_path.unlink(missing_ok=True)
-    write_metadata(out, title, idx, platform, hook)   # title + caption sidecar
+    meta = _ollama_metadata(transcript, idx) if (ai_meta and transcript) else None
+    write_metadata(out, title, idx, platform, hook, meta)   # title + caption sidecar
     print(f"[clip] {out}  ({out.stat().st_size // 1_000_000} MB)")
     return out
 
 
 def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="full",
                caption=None, subs=False, cap_size=66, title="Highlight",
-               platform="youtube", progress=None) -> list[Path]:
+               platform="youtube", progress=None, ai_meta=True) -> list[Path]:
     """Full local pipeline on a downloaded video. Shared by CLI + web."""
     dims = _dims(video)
     moments = find_hype_moments(video, clip_len, max_clips, peak_pos)
@@ -510,7 +581,7 @@ def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="
     for i, t in enumerate(moments, 1):
         clips.append(cut_clip(video, t, clip_len, i, layout, caption, subs, dims,
                               cap_size=cap_size, peak_pos=peak_pos,
-                              title=title, platform=platform))
+                              title=title, platform=platform, ai_meta=ai_meta))
         if progress:
             progress(i, len(moments))
     return clips
@@ -544,9 +615,11 @@ def show_channel():
 
 def upload_draft(clip: Path, title: str, idx: int):
     from googleapiclient.http import MediaFileUpload
-    body = {"snippet": {"title": f"{title} #{idx}",
-                        "description": "#LeagueOfLegends #LoL #Shorts #Gaming",
-                        "tags": ["LeagueOfLegends", "LoL", "Shorts", "Gaming"],
+    side = _read_sidecar(clip)   # prefer the (AI-written) sidecar metadata
+    tags = [t.strip() for t in side.get("TAGS", "").split(",") if t.strip()]
+    body = {"snippet": {"title": side.get("TITLE") or f"{title} #{idx}",
+                        "description": side.get("CAPTION") or "#LeagueOfLegends #LoL #Shorts #Gaming",
+                        "tags": tags or ["LeagueOfLegends", "LoL", "Shorts", "Gaming"],
                         "categoryId": "20"},
             "status": {"privacyStatus": "private", "selfDeclaredMadeForKids": False}}
     req = _youtube().videos().insert(
@@ -579,6 +652,8 @@ def main():
     p.add_argument("--platform", choices=["youtube", "tiktok", "both"], default="youtube",
                    help="platform the generated title/caption sidecar targets (youtube)")
     p.add_argument("--title", default="LoL Highlight", help="base title for clips and --draft")
+    p.add_argument("--no-ai-meta", action="store_true",
+                   help="skip Ollama title/description generation (falls back to hook titles)")
     p.add_argument("--draft", action="store_true", help="ALSO upload as PRIVATE drafts")
     p.add_argument("--list-channels", action="store_true",
                    help="show which channel --draft would use, then exit")
@@ -594,7 +669,7 @@ def main():
     clips = make_clips(video, max_clips=a.max_clips, clip_len=a.clip_len,
                        peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
                        subs=a.subtitles, cap_size=a.cap_size,
-                       title=a.title, platform=a.platform)
+                       title=a.title, platform=a.platform, ai_meta=not a.no_ai_meta)
 
     print(f"\n[done] {len(clips)} clips in ./{CLIPS_DIR}/")
     if a.draft:
