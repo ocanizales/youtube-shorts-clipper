@@ -252,8 +252,8 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
     """
     if layout == "split":      # only at the BOTTOM of the facecam (top) panel
         return 8, int(H * SPLIT_TOP_FRAC * 0.88)
-    if layout == "full":       # right UNDER the video so viewers don't look far down
-        return 8, full_video_height(dims) + 24
+    if layout == "full":       # right UNDER the (now centered) video
+        return 8, (H + full_video_height(dims)) // 2 + 24
     if layout == "fit":        # on the bottom blurred bar, clear of gameplay
         return 2, int(H * 0.07)
     return 2, int(H * 0.24)    # crop: lower third, above the bottom HUD
@@ -269,11 +269,11 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an,
               f"scale={W}:{top_h}:force_original_aspect_ratio=increase,crop={W}:{top_h}[cam];"
               f"[b]scale={W}:{bot_h}:force_original_aspect_ratio=increase,crop={W}:{bot_h}[game];"
               f"[cam][game]vstack=inputs=2")
-    elif layout == "full":                   # WHOLE video at the top, blurred fill below
+    elif layout == "full":                   # WHOLE video centered, blurred fill above+below
         vf = (f"split=2[bg][fg];"
               f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=22:4[b];"
               f"[fg]scale={W}:-2[v];"
-              f"[b][v]overlay=(W-w)/2:0")    # video pinned to the top edge
+              f"[b][v]overlay=(W-w)/2:(H-h)/2")  # vertically centered in the 9:16 frame
     elif layout == "fit":                    # whole frame centered + blurred bars
         vf = (f"split[bg][fg];[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
               f"crop={W}:{H},boxblur=22:4[b];"

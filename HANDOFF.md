@@ -8,6 +8,9 @@ _Last updated: 2026-07-16 (yt-dlp resolution fix). Update me before every sessio
   `--js-runtimes node:~/.local/bin/node`. Installed `yt-dlp-ejs` in the venv —
   without it YouTube signature solving fails and 1080p formats go missing
   (would violate the 1080p hard rule). Verified format list shows 1080p again.
+- **2026-07-16 (later):** "full" layout now centers the video vertically in
+  the 9:16 frame (was pinned to the top edge — user request); captions moved
+  to sit under the centered video. Verified via synthetic testsrc render.
 - **2026-07-05:** added `deploy/` (Linux `setup.sh` + optional
   `shorts-clipper.service`) for Ubuntu VPS deployment via
   `ocanizales/vps-setup`. Uploads need `client_secret_*.json` scp'd by hand.
