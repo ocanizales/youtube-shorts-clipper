@@ -564,9 +564,209 @@ def _read_sidecar(clip: Path) -> dict:
     return out
 
 
+# ── 3.6 AI-edited thumbnails ─────────────────────────────────────────────────
+# Fully automatic: pick the sharpest/most colorful frame near the hype moment,
+# grade it (saturation/contrast/vignette), punch in, and overlay a 2-3 word
+# ALL-CAPS hook (culture word bank -> Ollama -> title fallback). Design rules
+# from CTR research live in obsidian1 Sources/Web (LoL thumbnail design note).
+THUMB_W, THUMB_H = 1280, 720  # YouTube canvas; shows on channel grid + search
+THUMB_HOOK_WORDS = 3          # research says <=3-5 words; cap hard for legibility
+THUMB_GOLD = (255, 200, 0)    # last-word accent: gold on dark is the LoL palette
+
+# Culture terms with click-pull, only used when they appear in the title or the
+# spoken commentary — the hook must stay faithful to what actually happens.
+THUMB_HOOKS = ("PENTAKILL", "QUADRA", "BARON STEAL", "BARON", "OUTPLAY",
+               "CLUTCH", "ACE", "1V5", "1V4", "1V3", "200 IQ", "BACKDOOR",
+               "COMEBACK", "GAME WINNER", "THROW", "INSANE", "PERFECT")
+
+
+def _thumb_font(size: int):
+    """PIL wants the raw font path — FONT is drawtext-escaped for ffmpeg."""
+    from PIL import ImageFont
+    return ImageFont.truetype(FONT.replace(R"\:", ":"), size)
+
+
+def _frame_at(video: Path, t: float):
+    """One full-res frame at t seconds as a PIL image (None on failure)."""
+    import io
+    from PIL import Image
+    r = subprocess.run([_FFMPEG, "-v", "error", "-ss", f"{max(0, t):.2f}",
+                        "-i", str(video), "-frames:v", "1",
+                        "-f", "image2pipe", "-vcodec", "png", "-"],
+                       capture_output=True)
+    return Image.open(io.BytesIO(r.stdout)).convert("RGB") if r.stdout else None
+
+
+def _frame_score(img) -> float:
+    """Sharp + colorful + well-exposed wins. Edge energy favors ability-VFX
+    action frames, colorfulness rejects grey death/shop screens, and the
+    exposure term rejects fade-to-black transitions."""
+    from PIL import ImageFilter, ImageStat
+    small = img.resize((320, 180))
+    edges = ImageStat.Stat(small.convert("L").filter(ImageFilter.FIND_EDGES)).mean[0]
+    mean = ImageStat.Stat(small).mean
+    colorfulness = (abs(mean[0] - mean[1]) + abs(mean[1] - mean[2]) + abs(mean[2] - mean[0])) / 3
+    exposure = 1.0 - abs(sum(mean) / (3 * 255) - 0.45) * 2
+    return edges + colorfulness * 0.8 + exposure * 30
+
+
+def _pick_frame(video: Path, times):
+    """Best-scoring frame among candidate timestamps (None if all fail)."""
+    best, best_s = None, -1.0
+    for t in times:
+        img = _frame_at(video, t)
+        if img is not None:
+            s = _frame_score(img)
+            if s > best_s:
+                best, best_s = img, s
+    return best
+
+
+def _ollama_thumb_hook(text: str) -> str | None:
+    """2-3 word ALL-CAPS hook via local Ollama; None when it's down or rambles."""
+    import json
+    import urllib.request
+    prompt = (
+        "You write 2-3 word ALL-CAPS YouTube thumbnail hooks for League of "
+        f'Legends esports highlights. Clip title/commentary: "{text[:300]}"\n'
+        'Reply JSON only: {"hook": "..."} — 2-3 words, no punctuation, no emoji, '
+        "hype but professional (think PENTAKILL, BARON STEAL, FAKER OUTPLAY).")
+    body = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False,
+            "format": "json", "options": {"temperature": 0.3, "num_predict": 40}}
+    try:
+        req = urllib.request.Request(f"{OLLAMA_HOST}/api/generate",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            hook = json.loads(json.load(r)["response"]).get("hook", "")
+        words = re.sub(r"[^A-Za-z0-9 ]", "", str(hook)).upper().split()
+        if 1 <= len(words) <= THUMB_HOOK_WORDS and all(len(w) < 14 for w in words):
+            return " ".join(words)
+    except Exception:
+        pass
+    return None
+
+
+def _hook_text(title: str, transcript: str | None) -> str:
+    """Hook priority: culture term actually present in the clip -> Ollama ->
+    the first words of the title. Never empty."""
+    hay = f"{title} {transcript or ''}".upper()
+    for h in THUMB_HOOKS:
+        if h in hay:
+            return h
+    ai = _ollama_thumb_hook(transcript or title)
+    if ai:
+        return ai
+    words = re.sub(r"[^A-Za-z0-9 ]", "", title).upper().split()
+    return " ".join(words[:THUMB_HOOK_WORDS]) or "MUST SEE"
+
+
+def _compose_thumb(img, hook: str, out: Path):
+    """Grade + punch in + hook -> 1280x720 JPEG well under YouTube's 2MB cap.
+    Numbers follow the CTR research: ~1.25x punch-in so subjects read at feed
+    size, saturation/contrast lifted to survive feed compression, vignette to
+    pull the eye center, text top-LEFT (YouTube stamps its duration badge
+    bottom-right), white with a heavy black stroke, last word gold."""
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+    w, h = img.size
+    cw, ch = int(w / 1.25), int(h / 1.25)
+    img = img.crop(((w - cw) // 2, (h - ch) // 2, (w + cw) // 2, (h + ch) // 2))
+    img = img.resize((THUMB_W, THUMB_H), Image.LANCZOS)
+    img = ImageEnhance.Color(img).enhance(1.35)
+    img = ImageEnhance.Contrast(img).enhance(1.12)
+    img = ImageEnhance.Sharpness(img).enhance(1.5)
+    mask = Image.new("L", (THUMB_W, THUMB_H), 0)
+    ImageDraw.Draw(mask).ellipse((-THUMB_W // 3, -THUMB_H // 3,
+                                  THUMB_W * 4 // 3, THUMB_H * 4 // 3), fill=255)
+    mask = mask.filter(ImageFilter.GaussianBlur(120))
+    img = Image.composite(img, ImageEnhance.Brightness(img).enhance(0.62), mask)
+
+    d = ImageDraw.Draw(img)
+    size, font = 150, None
+    while size > 60:                      # shrink-to-fit within 90% of the width
+        font = _thumb_font(size)
+        if d.textlength(hook, font=font) <= THUMB_W * 0.90:
+            break
+        size -= 8
+    x, y, words = 44, 30, hook.split()
+    stroke = max(4, size // 9)
+    for i, wd in enumerate(words):
+        last = i == len(words) - 1 and len(words) > 1
+        d.text((x, y), wd, font=font, fill=THUMB_GOLD if last else (255, 255, 255),
+               stroke_width=stroke, stroke_fill=(0, 0, 0))
+        x += d.textlength(wd + " ", font=font)
+    img.save(out, "JPEG", quality=88)
+    print(f"[thumb] {out}")
+
+
+def make_thumbnail(video: Path, start: float, dur: int, peak_pos: float,
+                   idx: int, clip_out: Path, title: str, transcript: str | None):
+    """AI thumbnail for a freshly cut clip, taken from the CLEAN source video
+    (no burned captions): sample frames around the audio spike, keep the best.
+    Never fails the render — a clip without a thumb beats no clip."""
+    try:
+        peak = start + peak_pos * dur
+        img = _pick_frame(video, [max(start, peak + o)
+                                  for o in (-2.5, -1.5, -0.5, 0.5, 1.5, 2.5)])
+        if img is None:
+            print(f"[thumb {idx}] no frame extracted — skipped")
+            return None
+        out = clip_out.with_name(clip_out.stem + "_thumb.jpg")
+        _compose_thumb(img, _hook_text(title, transcript), out)
+        return out
+    except Exception as ex:
+        print(f"[thumb {idx}] failed ({ex.__class__.__name__}: {ex})")
+        return None
+
+
+def _uncrop_916(img):
+    """Recover a 16:9 action canvas from a rendered 9:16 clip frame.
+    zoom clips have a pure-black caption bar up top (and a sharp HUD band at
+    the bottom) -> lift the playfield band; anything else is treated as the
+    'full' layout, whose middle band holds the whole source frame."""
+    from PIL import ImageStat
+    w, h = img.size
+
+    def region_mean(box):
+        return sum(ImageStat.Stat(img.crop(box)).mean) / 3
+
+    top_bar = _even(h * ZOOM_TOP_FRAC)
+    if region_mean((0, 0, w // 8, 40)) < 10:          # zoom: black corner
+        hud_out = _even(_even(1080 * ZOOM_HUD_FRAC * 16 / 9) * w / (1080 * 16 / 9))
+        band = img.crop((0, top_bar, w, h - hud_out))
+        bh = int(w * 9 / 16)
+        y0 = top_bar + (band.height - bh) // 2
+        return img.crop((0, max(top_bar, y0), w, min(h - hud_out, y0 + bh)))
+    bh = int(w * 9 / 16)                              # full: frame sits centered
+    return img.crop((0, (h - bh) // 2, w, (h + bh) // 2))
+
+
+def rethumb_all():
+    """Regenerate thumbnails for every rendered clip in clips/ — no re-render,
+    no VOD needed. Uses the clip itself (canvas recovered per layout) and the
+    sidecar title for the hook."""
+    clips = sorted(CLIPS_DIR.glob("short_*.mp4"))
+    if not clips:
+        return print(f"[thumb] no clips in ./{CLIPS_DIR}/")
+    for mp4 in clips:
+        probe = _FFMPEG.replace("ffmpeg.exe", "ffprobe.exe") if _FFMPEG_DIR else "ffprobe"
+        out = subprocess.run([probe, "-v", "error", "-show_entries", "format=duration",
+                              "-of", "csv=p=0", str(mp4)], capture_output=True, text=True).stdout
+        dur = float(out.strip() or 30)
+        img = _pick_frame(mp4, [dur * f for f in (0.15, 0.30, 0.45, 0.60, 0.75)])
+        if img is None:
+            print(f"[thumb] {mp4.name}: no frame — skipped")
+            continue
+        title = (_read_sidecar(mp4).get("TITLE") or mp4.stem).splitlines()[0]
+        title = re.sub(r"\s*\(#\d+\)\s*$", "", title).replace("🔥", "").strip()
+        _compose_thumb(_uncrop_916(img), _hook_text(title, None),
+                       mp4.with_name(mp4.stem + "_thumb.jpg"))
+
+
 def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
              cap_size=66, peak_pos=0.65, facecam_override=None,
-             title="Highlight", platform="youtube", ai_meta=True) -> Path:
+             title="Highlight", platform="youtube", ai_meta=True,
+             thumbs=True) -> Path:
     out = CLIPS_DIR / f"short_{idx:02d}_{int(start)}s.mp4"
     src_w, src_h = dims
 
@@ -604,13 +804,16 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         ass_path.unlink(missing_ok=True)
     meta = _ollama_metadata(transcript, idx) if (ai_meta and transcript) else None
     write_metadata(out, title, idx, platform, hook, meta)   # title + caption sidecar
+    if thumbs:                                   # AI thumbnail from the clean source
+        make_thumbnail(video, start, dur, peak_pos, idx, out,
+                       (meta or {}).get("title") or (hook or title), transcript)
     print(f"[clip] {out}  ({out.stat().st_size // 1_000_000} MB)")
     return out
 
 
 def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="full",
                caption=None, subs=False, cap_size=66, title="Highlight",
-               platform="youtube", progress=None, ai_meta=True) -> list[Path]:
+               platform="youtube", progress=None, ai_meta=True, thumbs=True) -> list[Path]:
     """Full local pipeline on a downloaded video. Shared by CLI + web."""
     dims = _dims(video)
     moments = find_hype_moments(video, clip_len, max_clips, peak_pos)
@@ -618,7 +821,8 @@ def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="
     for i, t in enumerate(moments, 1):
         clips.append(cut_clip(video, t, clip_len, i, layout, caption, subs, dims,
                               cap_size=cap_size, peak_pos=peak_pos,
-                              title=title, platform=platform, ai_meta=ai_meta))
+                              title=title, platform=platform, ai_meta=ai_meta,
+                              thumbs=thumbs))
         if progress:
             progress(i, len(moments))
     return clips
@@ -693,6 +897,10 @@ def main():
     p.add_argument("--title", default="LoL Highlight", help="base title for clips and --draft")
     p.add_argument("--no-ai-meta", action="store_true",
                    help="skip Ollama title/description generation (falls back to hook titles)")
+    p.add_argument("--no-thumbs", action="store_true",
+                   help="skip AI thumbnail generation (<clip>_thumb.jpg next to each clip)")
+    p.add_argument("--rethumb", action="store_true",
+                   help="regenerate thumbnails for existing clips in clips/, then exit")
     p.add_argument("--draft", action="store_true", help="ALSO upload as PRIVATE drafts")
     p.add_argument("--list-channels", action="store_true",
                    help="show which channel --draft would use, then exit")
@@ -700,15 +908,18 @@ def main():
 
     if a.list_channels:
         return show_channel()
+    if a.rethumb:
+        return rethumb_all()
     if not a.url:
-        p.error("a YouTube URL is required (unless using --list-channels)")
+        p.error("a YouTube URL is required (unless using --list-channels or --rethumb)")
 
     print(f"\n=== LoL Clipper ===\n{a.max_clips} x {a.clip_len}s | layout={a.layout}\n")
     video = download_video(a.url)
     clips = make_clips(video, max_clips=a.max_clips, clip_len=a.clip_len,
                        peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
                        subs=a.subtitles, cap_size=a.cap_size,
-                       title=a.title, platform=a.platform, ai_meta=not a.no_ai_meta)
+                       title=a.title, platform=a.platform, ai_meta=not a.no_ai_meta,
+                       thumbs=not a.no_thumbs)
 
     print(f"\n[done] {len(clips)} clips in ./{CLIPS_DIR}/")
     if a.draft:

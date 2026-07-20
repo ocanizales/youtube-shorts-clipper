@@ -1,5 +1,5 @@
 # PROJECT_MAP — youtube-shorts-clipper
-_Generated 2026-07-16 by scripts/build_memory.py — do not edit by hand._
+_Generated 2026-07-20 by scripts/build_memory.py — do not edit by hand._
 
 ## clipper.py
   - _LoL YouTube Shorts Clipper — turn a YouTube VOD into 9:16 highlight clips._
@@ -7,14 +7,17 @@ _Generated 2026-07-16 by scripts/build_memory.py — do not edit by hand._
   - `download_video(url, on_progress)` — Download the best video+audio up to 1080p (any container), merged.
   - `find_hype_moments(video, clip_len, top_n, peak_pos)`
   - `focus_x(video, start, dur, src_w, src_h, crop_w, spike_frac)` — Return the left x (px) of the crop window that captures the most action.
+  - `zoom_geometry(dims)` — Band plan for the 'zoom' layout (the Korean solo-queue Short look):
   - `full_video_height(dims)` — Height (px) of the source frame when scaled to the full 1080 width.
   - `caption_anchor(layout, dims)` — Where captions belong for each layout, as (ASS alignment, margin px).
   - `build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin)`
   - `make_dynamic_captions(clip, an, margin_v, fontsize)` — Transcribe spoken words and write an .ass with word-by-word reveal where the
   - `detect_facecam(video, start, dur, src_w, src_h)` — Best-effort: find a streamer facecam box via face detection on sampled frames.
   - `has_existing_captions(video, start, dur, dims)` — True if the source already has captions, so we don't add a duplicate layer:
-  - `write_metadata(clip, title_base, idx, platform, hook)` — Write a sidecar .txt with a ready-to-paste title + caption for the platform(s).
-  - `cut_clip(video, start, dur, idx, layout, caption, subs, dims, cap_size, peak_pos, facecam_override, title, platform)`
+  - `write_metadata(clip, title_base, idx, platform, hook, meta)` — Write a sidecar .txt with a ready-to-paste title + caption for the
+  - `make_thumbnail(video, start, dur, peak_pos, idx, clip_out, title, transcript)` — AI thumbnail for a freshly cut clip, taken from the CLEAN source video
+  - `rethumb_all()` — Regenerate thumbnails for every rendered clip in clips/ — no re-render,
+  - `cut_clip(video, start, dur, idx, layout, caption, subs, dims, cap_size, peak_pos, facecam_override, title, platform, ai_meta, thumbs)`
   - `make_clips(video)` — Full local pipeline on a downloaded video. Shared by CLI + web.
   - `show_channel()`
   - `upload_draft(clip, title, idx)`
@@ -69,4 +72,4 @@ _Generated 2026-07-16 by scripts/build_memory.py — do not edit by hand._
   - `main()`
 
 ## Dependencies
-  - requirements.txt: yt-dlp                      # download YouTube videos, librosa                    # audio energy analysis for highlight detection, numpy                      # RMS / peak math, google-api-python-client, google-auth-httplib2, google-auth-oauthlib
+  - requirements.txt: yt-dlp                      # download YouTube videos, yt-dlp-ejs                  # JS challenge solver — without it YouTube hides formats (needs node/deno), librosa                    # audio energy analysis for highlight detection, numpy                      # RMS / peak math, google-api-python-client, google-auth-httplib2, google-auth-oauthlib
