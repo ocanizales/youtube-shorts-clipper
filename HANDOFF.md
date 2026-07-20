@@ -1,7 +1,24 @@
 # HANDOFF — youtube-shorts-clipper
-_Last updated: 2026-07-16 (zoom layout). Update me before every session end._
+_Last updated: 2026-07-20 (upload quality). Update me before every session end._
 
 ## Current state
+- **2026-07-20 (upload quality):** clips were going out at ~5.8 Mbps, which
+  YouTube's own re-encode then crushed further. Fixed end to end:
+  - Source: `FMT_SORT` now prefers **VP9** over h264 at 1080p (more detail at
+    YouTube's serving bitrate); merge container is mkv so VP9+opus is remuxed
+    losslessly. AV1 deliberately not preferred — too slow to decode on the VPS.
+  - Encode: `SHORTS_QUALITY` env tier (`fast`/`high`/`max`, default **high**) =
+    x264 crf 17 / preset medium / capped VBR 24M, NVENC p7 cq 19 where a GPU
+    exists. Measured: 5.8 → **9.3 Mbps** on a 1080x1920@60 clip.
+  - Scaling: `-sws_flags lanczos+accurate_rnd+full_chroma_int` (the pipeline does
+    big upscales onto the 1080x1920 canvas; default bicubic softened HUD text).
+  - Color: chain now ends in `setparams=...bt709...` so clips are tagged Rec.709.
+    Untagged h264 gets guessed as BT.601 by YouTube → the washed-out look.
+    **Gotcha:** `-color_primaries`/`-color_trc` do *nothing* on this ffmpeg build
+    (8.0.1, verified transfer=unknown in the output) — the filter is required.
+  - Cost: render is slower than the old `veryfast` (a 15s clip = ~33s wall on the
+    8-core VPS, ~2.2x realtime). This trades against open defect #2 (speed) —
+    `SHORTS_QUALITY=fast` restores the old fast path for previews.
 - **2026-07-16 (zoom layout):** new `--layout zoom`, the Korean solo-queue Short
   look the user referenced (youtube.com/shorts/l6lhaJ5Sh4Q): black caption bar on
   top (captions render inside it), ~1.8x motion-tracked punch-in of the playfield

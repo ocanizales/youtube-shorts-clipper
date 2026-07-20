@@ -38,8 +38,11 @@ FONT = _resolve_font()
 # Always grab the best video up to 1080p, ANY codec (1080p on YouTube is usually
 # VP9/webm, not mp4 — restricting to mp4 silently drops you to 720p or lower).
 FMT = "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b"
-# Format sort: prefer resolution 1080, then 60fps, then h264 (mp4-friendly), then m4a.
-FMT_SORT = "res:1080,fps,vcodec:h264,acodec:m4a"
+# Format sort: resolution 1080 first, then 60fps, then VP9 — at a given YouTube
+# resolution the VP9 rendition carries noticeably more detail than the h264 one,
+# and we re-encode everything anyway so the source container doesn't matter.
+# (AV1 is left at default rank: better still, but too slow to decode on a CPU VPS.)
+FMT_SORT = "res:1080,fps,vcodec:vp9,acodec:opus"
 _MEDIA_EXTS = (".mp4", ".mkv", ".webm")
 
 _WINGET_FFMPEG = (
@@ -63,18 +66,44 @@ def _resolve_ffmpeg() -> tuple[str, str | None]:
 _FFMPEG, _FFMPEG_DIR = _resolve_ffmpeg()
 
 
+# Encode quality tier. YouTube re-encodes every upload with a lossy VP9/AV1 pass,
+# so whatever we hand it is the *ceiling* — a lean upload gets crushed twice.
+# We deliberately upload far above YouTube's own recommended 1080p bitrate
+# (~8–12 Mbps) so the transcoder has clean detail to work from.
+#   fast = old behaviour (quick previews), high = default, max = archival.
+QUALITY = os.environ.get("SHORTS_QUALITY", "high").lower()
+_X264 = {                       # crf, preset, target maxrate, bufsize
+    "fast": ("21", "veryfast", "12M", "24M"),
+    "high": ("17", "medium",   "24M", "48M"),
+    "max":  ("15", "slow",     "40M", "80M"),
+}
+_NVENC_CQ = {"fast": "23", "high": "19", "max": "16"}
+# Appended to every output filter chain so the file is tagged Rec.709 (see cut_clip).
+_BT709 = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
+
+
 def _pick_encoder() -> list[str]:
-    """Use NVIDIA NVENC if it actually works (much faster); else fast x264."""
+    """Use NVIDIA NVENC if it actually works (much faster); else quality x264.
+
+    Both paths are capped-VBR: a low CRF/CQ for detail plus a maxrate ceiling so
+    a single busy teamfight can't balloon the file past what upload can handle."""
+    crf, preset, maxrate, bufsize = _X264.get(QUALITY, _X264["high"])
     try:
         subprocess.run([_FFMPEG, "-hide_banner", "-f", "lavfi",
                         "-i", "color=black:s=64x64:d=0.1",
                         "-c:v", "h264_nvenc", "-f", "null", "-"],
                        capture_output=True, check=True)
-        print("[encoder] NVIDIA NVENC (GPU) — fast")
-        return ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23"]
+        cq = _NVENC_CQ.get(QUALITY, "19")
+        print(f"[encoder] NVIDIA NVENC (GPU) — quality={QUALITY} cq={cq} cap={maxrate}")
+        return ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq",
+                "-rc", "vbr", "-cq", cq, "-maxrate", maxrate, "-bufsize", bufsize,
+                "-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1",
+                "-profile:v", "high"]
     except (FileNotFoundError, subprocess.CalledProcessError):
-        print("[encoder] libx264 (CPU) — preset veryfast")
-        return ["-c:v", "libx264", "-crf", "21", "-preset", "veryfast"]
+        print(f"[encoder] libx264 (CPU) — quality={QUALITY} crf={crf} preset={preset}")
+        return ["-c:v", "libx264", "-crf", crf, "-preset", preset,
+                "-maxrate", maxrate, "-bufsize", bufsize,
+                "-profile:v", "high", "-level", "4.2"]
 
 
 _ENC = _pick_encoder()
@@ -128,7 +157,8 @@ def download_video(url: str, on_progress=None) -> Path:
         return cached
 
     cmd = [*_YTDLP, "--no-playlist", "-N", "8", "--newline", "-f", FMT,
-           "-S", FMT_SORT, "--merge-output-format", "mp4",
+           # mkv merges VP9+opus losslessly; mp4 would force an extra remux.
+           "-S", FMT_SORT, "--merge-output-format", "mkv",
            "-o", str(DOWNLOADS_DIR / f"{vid}.%(ext)s")]
     if _FFMPEG_DIR:
         cmd += ["--ffmpeg-location", _FFMPEG_DIR]
@@ -795,9 +825,20 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         tmp.unlink(missing_ok=True)
 
     cap_an, cap_margin = caption_anchor(layout, dims)
-    ff("-y", "-ss", str(start), "-i", str(video), "-t", str(dur),
-       "-vf", build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin),
+    ff("-y",
+       # Lanczos beats ffmpeg's default bicubic on the big upscales this pipeline
+       # does (720/1080 source -> 1080x1920 canvas); keeps HUD text/edges crisp.
+       "-sws_flags", "lanczos+accurate_rnd+full_chroma_int",
+       "-ss", str(start), "-i", str(video), "-t", str(dur),
+       # Tag BT.709 explicitly — untagged uploads get guessed as BT.601 by the
+       # YouTube transcoder, which is what makes clips look washed out/dull.
+       # Done as a filter, not via -color_primaries/-color_trc: this ffmpeg build
+       # silently drops those into the h264 VUI (verified: transfer=unknown).
+       "-vf", build_vf(layout, dims, crop_x, facecam, ass_path, caption,
+                       cap_size, cap_an, cap_margin) + "," + _BT709,
        *_ENC, "-pix_fmt", "yuv420p",
+       # A keyframe every 2s is what YouTube's ingest wants; avoids re-encode drift.
+       "-force_key_frames", "expr:gte(t,n_forced*2)",
        "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k",
        "-movflags", "+faststart", str(out))
     if ass_path:
