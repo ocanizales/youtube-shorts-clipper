@@ -10,6 +10,8 @@ Wants=network-online.target
 Type=simple
 User=__USER__
 WorkingDirectory=__WORKDIR__
+# Web renders use the MAX quality tier by default (slower, best-looking).
+Environment=SHORTS_QUALITY=max
 ExecStart=__WORKDIR__/.venv/bin/python serve.py
 Restart=on-failure
 RestartSec=10

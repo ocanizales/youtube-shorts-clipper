@@ -75,7 +75,9 @@ QUALITY = os.environ.get("SHORTS_QUALITY", "high").lower()
 _X264 = {                       # crf, preset, target maxrate, bufsize
     "fast": ("21", "veryfast", "12M", "24M"),
     "high": ("17", "medium",   "24M", "48M"),
-    "max":  ("15", "slow",     "40M", "80M"),
+    # max: lowest CRF the upload pipeline benefits from + the slowest preset we'll
+    # accept, with headroom on the rate cap so a busy teamfight keeps its detail.
+    "max":  ("15", "slower",   "48M", "96M"),
 }
 _NVENC_CQ = {"fast": "23", "high": "19", "max": "16"}
 # Appended to every output filter chain so the file is tagged Rec.709 (see cut_clip).
@@ -95,10 +97,13 @@ def _pick_encoder() -> list[str]:
                        capture_output=True, check=True)
         cq = _NVENC_CQ.get(QUALITY, "19")
         print(f"[encoder] NVIDIA NVENC (GPU) — quality={QUALITY} cq={cq} cap={maxrate}")
-        return ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq",
+        args = ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq",
                 "-rc", "vbr", "-cq", cq, "-maxrate", maxrate, "-bufsize", bufsize,
                 "-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1",
                 "-profile:v", "high"]
+        if QUALITY == "max":                 # squeeze the GPU path harder (slower, better)
+            args += ["-multipass", "fullres", "-b_ref_mode", "middle"]
+        return args
     except (FileNotFoundError, subprocess.CalledProcessError):
         print(f"[encoder] libx264 (CPU) — quality={QUALITY} crf={crf} preset={preset}")
         return ["-c:v", "libx264", "-crf", crf, "-preset", preset,
@@ -825,6 +830,14 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         tmp.unlink(missing_ok=True)
 
     cap_an, cap_margin = caption_anchor(layout, dims)
+    vf = build_vf(layout, dims, crop_x, facecam, ass_path, caption,
+                  cap_size, cap_an, cap_margin)
+    if QUALITY == "max":
+        # Only at max: a mild unsharp before the color tag. The pipeline upscales
+        # heavily onto 1080x1920 and YouTube's re-encode softens edges; this keeps
+        # HUD/caption edges crisp. Amount kept low (0.4) to avoid halos/ringing.
+        vf += ",unsharp=5:5:0.4:5:5:0.0"
+    vf += "," + _BT709
     ff("-y",
        # Lanczos beats ffmpeg's default bicubic on the big upscales this pipeline
        # does (720/1080 source -> 1080x1920 canvas); keeps HUD text/edges crisp.
@@ -834,8 +847,7 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
        # YouTube transcoder, which is what makes clips look washed out/dull.
        # Done as a filter, not via -color_primaries/-color_trc: this ffmpeg build
        # silently drops those into the h264 VUI (verified: transfer=unknown).
-       "-vf", build_vf(layout, dims, crop_x, facecam, ass_path, caption,
-                       cap_size, cap_an, cap_margin) + "," + _BT709,
+       "-vf", vf,
        *_ENC, "-pix_fmt", "yuv420p",
        # A keyframe every 2s is what YouTube's ingest wants; avoids re-encode drift.
        "-force_key_frames", "expr:gte(t,n_forced*2)",
