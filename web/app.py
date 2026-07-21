@@ -123,7 +123,8 @@ def status(job_id):
     if not job:
         return jsonify(stage="Unknown job", done=True, error=1)
     return jsonify(stage=job["stage"], progress=job["progress"],
-                   done=job["done"], error=job["error"], clips=job["clips"])
+                   done=job["done"], error=job["error"], clips=job["clips"],
+                   thumb=job.get("thumb"))
 
 
 @app.get("/clips/<path:name>")

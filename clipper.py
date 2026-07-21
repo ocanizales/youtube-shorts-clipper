@@ -75,7 +75,9 @@ QUALITY = os.environ.get("SHORTS_QUALITY", "high").lower()
 _X264 = {                       # crf, preset, target maxrate, bufsize
     "fast": ("21", "veryfast", "12M", "24M"),
     "high": ("17", "medium",   "24M", "48M"),
-    "max":  ("15", "slow",     "40M", "80M"),
+    # max: lowest CRF the upload pipeline benefits from + the slowest preset we'll
+    # accept, with headroom on the rate cap so a busy teamfight keeps its detail.
+    "max":  ("15", "slower",   "48M", "96M"),
 }
 _NVENC_CQ = {"fast": "23", "high": "19", "max": "16"}
 # Appended to every output filter chain so the file is tagged Rec.709 (see cut_clip).
@@ -95,10 +97,13 @@ def _pick_encoder() -> list[str]:
                        capture_output=True, check=True)
         cq = _NVENC_CQ.get(QUALITY, "19")
         print(f"[encoder] NVIDIA NVENC (GPU) — quality={QUALITY} cq={cq} cap={maxrate}")
-        return ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq",
+        args = ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq",
                 "-rc", "vbr", "-cq", cq, "-maxrate", maxrate, "-bufsize", bufsize,
                 "-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1",
                 "-profile:v", "high"]
+        if QUALITY == "max":                 # squeeze the GPU path harder (slower, better)
+            args += ["-multipass", "fullres", "-b_ref_mode", "middle"]
+        return args
     except (FileNotFoundError, subprocess.CalledProcessError):
         print(f"[encoder] libx264 (CPU) — quality={QUALITY} crf={crf} preset={preset}")
         return ["-c:v", "libx264", "-crf", crf, "-preset", preset,
@@ -401,8 +406,10 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int):
             "[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,OutlineColour,"
             "BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,"
             "BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n"
+            # Viral (MrBeast/Hormozi) look: thicker Outline 6 + Shadow 3 so big
+            # ALL-CAPS words stay legible over busy gameplay (was Outline 4 / Shadow 2).
             f"Style: Pop,Arial,{fontsize},&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,"
-            f"100,100,0,0,1,4,2,{an},60,60,{margin_v},1\n\n"
+            f"100,100,0,0,1,6,3,{an},60,60,{margin_v},1\n\n"
             "[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n")
 
     lines = []
@@ -415,7 +422,15 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int):
             end = max(end, ws + 0.1)
             parts = []
             for j, (wt, _, _) in enumerate(phrase[:i + 1]):
-                parts.append(f"{{\\c&H{ACCENT}&}}{wt}{{\\c&HFFFFFF&}}" if j == i else wt)
+                wt = wt.upper()               # ALL-CAPS displayed text (viral style)
+                if j == i:
+                    # Active spoken word: accent gold + a brief ~100ms pop that
+                    # scales down from 118%->100% so it snaps the eye. Pop kept
+                    # modest so caps never spill past the reserved caption band.
+                    parts.append(f"{{\\fscx118\\fscy118\\t(0,100,\\fscx100\\fscy100)"
+                                 f"\\c&H{ACCENT}&}}{wt}{{\\c&HFFFFFF&}}")
+                else:
+                    parts.append(wt)          # already-revealed words: plain white
             lines.append(f"Dialogue: 0,{_ass_ts(ws)},{_ass_ts(end)},Pop,,0,0,0,,"
                          + " ".join(parts))
 
@@ -749,6 +764,38 @@ def make_thumbnail(video: Path, start: float, dur: int, peak_pos: float,
         return None
 
 
+def make_hero_thumbnail(video: Path, moments, dims, title: str,
+                        transcript: str | None, out_path: Path,
+                        *, peak_pos: float, clip_len: int):
+    """ONE hero thumbnail for the whole source, composed like a per-clip thumb.
+
+    Samples frames around the audio peak of each hype moment off the CLEAN source
+    (no burned captions) and keeps the single best-scoring frame (sharp + colorful
+    + well-exposed) — i.e. the most thumbnail-worthy instant of the video. This
+    picks by frame score across the moments rather than the raw audio rank because
+    ``find_hype_moments`` returns its moments time-sorted, and visual score is a
+    better predictor of a compelling thumbnail than loudness alone. Never fails the
+    job — returns ``out_path`` or ``None``.
+    """
+    if not moments:
+        return None
+    try:
+        cands = []
+        for m in moments:
+            peak = m + peak_pos * clip_len           # where the spike sits in each clip
+            cands += [max(0.0, peak + o) for o in (-1.5, -0.5, 0.5, 1.5)]
+        img = _pick_frame(video, cands)
+        if img is None:
+            print("[hero] no frame extracted — skipped")
+            return None
+        _compose_thumb(img, _hook_text(title, transcript), out_path)
+        print(f"[hero] {out_path}")
+        return out_path
+    except Exception as ex:
+        print(f"[hero] failed ({ex.__class__.__name__}: {ex})")
+        return None
+
+
 def _uncrop_916(img):
     """Recover a 16:9 action canvas from a rendered 9:16 clip frame.
     zoom clips have a pure-black caption bar up top (and a sharp HUD band at
@@ -796,7 +843,7 @@ def rethumb_all():
 def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
              cap_size=66, peak_pos=0.65, facecam_override=None,
              title="Highlight", platform="youtube", ai_meta=True,
-             thumbs=True) -> Path:
+             thumbs=False) -> Path:
     out = CLIPS_DIR / f"short_{idx:02d}_{int(start)}s.mp4"
     src_w, src_h = dims
 
@@ -825,6 +872,14 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         tmp.unlink(missing_ok=True)
 
     cap_an, cap_margin = caption_anchor(layout, dims)
+    vf = build_vf(layout, dims, crop_x, facecam, ass_path, caption,
+                  cap_size, cap_an, cap_margin)
+    if QUALITY == "max":
+        # Only at max: a mild unsharp before the color tag. The pipeline upscales
+        # heavily onto 1080x1920 and YouTube's re-encode softens edges; this keeps
+        # HUD/caption edges crisp. Amount kept low (0.4) to avoid halos/ringing.
+        vf += ",unsharp=5:5:0.4:5:5:0.0"
+    vf += "," + _BT709
     ff("-y",
        # Lanczos beats ffmpeg's default bicubic on the big upscales this pipeline
        # does (720/1080 source -> 1080x1920 canvas); keeps HUD text/edges crisp.
@@ -834,8 +889,7 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
        # YouTube transcoder, which is what makes clips look washed out/dull.
        # Done as a filter, not via -color_primaries/-color_trc: this ffmpeg build
        # silently drops those into the h264 VUI (verified: transfer=unknown).
-       "-vf", build_vf(layout, dims, crop_x, facecam, ass_path, caption,
-                       cap_size, cap_an, cap_margin) + "," + _BT709,
+       "-vf", vf,
        *_ENC, "-pix_fmt", "yuv420p",
        # A keyframe every 2s is what YouTube's ingest wants; avoids re-encode drift.
        "-force_key_frames", "expr:gte(t,n_forced*2)",
@@ -854,8 +908,14 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
 
 def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="full",
                caption=None, subs=False, cap_size=66, title="Highlight",
-               platform="youtube", progress=None, ai_meta=True, thumbs=True) -> list[Path]:
-    """Full local pipeline on a downloaded video. Shared by CLI + web."""
+               platform="youtube", progress=None, ai_meta=True, thumbs=True
+               ) -> tuple[list[Path], Path | None]:
+    """Full local pipeline on a downloaded video. Shared by CLI + web.
+
+    Returns ``(clips, hero)`` — the rendered clips plus ONE hero thumbnail for the
+    whole source (or ``None`` if disabled/unavailable). Per-clip thumbnails are no
+    longer produced; ``thumbs`` now gates the single hero thumb.
+    """
     dims = _dims(video)
     moments = find_hype_moments(video, clip_len, max_clips, peak_pos)
     clips = []
@@ -863,10 +923,15 @@ def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="
         clips.append(cut_clip(video, t, clip_len, i, layout, caption, subs, dims,
                               cap_size=cap_size, peak_pos=peak_pos,
                               title=title, platform=platform, ai_meta=ai_meta,
-                              thumbs=thumbs))
+                              thumbs=False))          # no per-clip thumbs; hero below
         if progress:
             progress(i, len(moments))
-    return clips
+    hero = None
+    if thumbs and clips:
+        hero = make_hero_thumbnail(video, moments, dims, title, None,
+                                   CLIPS_DIR / f"hero_{video.stem}.jpg",
+                                   peak_pos=peak_pos, clip_len=clip_len)
+    return clips, hero
 
 
 # ── 4. YouTube (only for --draft / --list-channels) ──────────────────────────
@@ -939,7 +1004,7 @@ def main():
     p.add_argument("--no-ai-meta", action="store_true",
                    help="skip Ollama title/description generation (falls back to hook titles)")
     p.add_argument("--no-thumbs", action="store_true",
-                   help="skip AI thumbnail generation (<clip>_thumb.jpg next to each clip)")
+                   help="skip the hero thumbnail (clips/hero_<source>.jpg, one per video)")
     p.add_argument("--rethumb", action="store_true",
                    help="regenerate thumbnails for existing clips in clips/, then exit")
     p.add_argument("--draft", action="store_true", help="ALSO upload as PRIVATE drafts")
@@ -956,13 +1021,15 @@ def main():
 
     print(f"\n=== LoL Clipper ===\n{a.max_clips} x {a.clip_len}s | layout={a.layout}\n")
     video = download_video(a.url)
-    clips = make_clips(video, max_clips=a.max_clips, clip_len=a.clip_len,
-                       peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
-                       subs=a.subtitles, cap_size=a.cap_size,
-                       title=a.title, platform=a.platform, ai_meta=not a.no_ai_meta,
-                       thumbs=not a.no_thumbs)
+    clips, hero = make_clips(video, max_clips=a.max_clips, clip_len=a.clip_len,
+                             peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
+                             subs=a.subtitles, cap_size=a.cap_size,
+                             title=a.title, platform=a.platform, ai_meta=not a.no_ai_meta,
+                             thumbs=not a.no_thumbs)
 
     print(f"\n[done] {len(clips)} clips in ./{CLIPS_DIR}/")
+    if hero:
+        print(f"[done] hero thumbnail: ./{hero}")
     if a.draft:
         show_channel()
         for i, c in enumerate(clips, 1):
