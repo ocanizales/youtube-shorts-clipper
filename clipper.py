@@ -406,8 +406,10 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int):
             "[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,OutlineColour,"
             "BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,"
             "BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n"
+            # Viral (MrBeast/Hormozi) look: thicker Outline 6 + Shadow 3 so big
+            # ALL-CAPS words stay legible over busy gameplay (was Outline 4 / Shadow 2).
             f"Style: Pop,Arial,{fontsize},&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,"
-            f"100,100,0,0,1,4,2,{an},60,60,{margin_v},1\n\n"
+            f"100,100,0,0,1,6,3,{an},60,60,{margin_v},1\n\n"
             "[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n")
 
     lines = []
@@ -420,7 +422,15 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int):
             end = max(end, ws + 0.1)
             parts = []
             for j, (wt, _, _) in enumerate(phrase[:i + 1]):
-                parts.append(f"{{\\c&H{ACCENT}&}}{wt}{{\\c&HFFFFFF&}}" if j == i else wt)
+                wt = wt.upper()               # ALL-CAPS displayed text (viral style)
+                if j == i:
+                    # Active spoken word: accent gold + a brief ~100ms pop that
+                    # scales down from 118%->100% so it snaps the eye. Pop kept
+                    # modest so caps never spill past the reserved caption band.
+                    parts.append(f"{{\\fscx118\\fscy118\\t(0,100,\\fscx100\\fscy100)"
+                                 f"\\c&H{ACCENT}&}}{wt}{{\\c&HFFFFFF&}}")
+                else:
+                    parts.append(wt)          # already-revealed words: plain white
             lines.append(f"Dialogue: 0,{_ass_ts(ws)},{_ass_ts(end)},Pop,,0,0,0,,"
                          + " ".join(parts))
 
