@@ -1,7 +1,33 @@
 # HANDOFF — youtube-shorts-clipper
-_Last updated: 2026-07-20 (upload quality). Update me before every session end._
+_Last updated: 2026-07-21 (viral upgrade). Update me before every session end._
 
 ## Current state
+- **2026-07-21 (viral upgrade, branch `viral-upgrade`):** three standing
+  defaults, each verified with the repo's synthetic-render style.
+  - **One hero thumbnail per URL** (not per clip). Per-clip `*_thumb.jpg` are gone
+    (`cut_clip(thumbs=False)` default). `make_clips` now returns `(clips, hero)`
+    and, after cutting, builds ONE `clips/hero_<source>.jpg` via new
+    `make_hero_thumbnail(...)`: best-scoring frame across every hype moment's peak
+    off the CLEAN source, composed with the same grade/hook as before. **Note:** it
+    picks by frame score across moments, not raw audio rank-0 — `find_hype_moments`
+    returns moments *time-sorted*, so "rank 0" would be the earliest clip, not the
+    strongest; visual score better predicts a good thumbnail. Surfaced in the web
+    UI: `jobs.thumb` column (idempotent ALTER), `/status` returns `thumb`, and the
+    poll renders it prominently above the clip grid (`.hero`, download link).
+  - **Max quality by default for web renders.** `serve.py` + systemd set
+    `SHORTS_QUALITY=max`; CLI default stays `high`. `max` tier strengthened:
+    x264 crf15 / preset **slower** / 48M / 96M; NVENC adds
+    `-multipass fullres -b_ref_mode middle`; plus a mild `unsharp=5:5:0.4:5:5:0.0`
+    inserted before the BT709 tag **only** at max. Verified: bt709 tags on a real
+    render, `unsharp` present at max and absent at high.
+  - **Viral captions** (MrBeast/Hormozi): ALL-CAPS displayed text, Outline 4→6 /
+    Shadow 2→3, and a ~100ms 118%→100% **pop** + gold accent on the active spoken
+    word; revealed words stay plain white. Placement/anchor, silence-clear timing,
+    and the `has_existing_captions` skip are unchanged.
+  - **Not yet pushed / not merged to master** — awaiting user. Flask isn't
+    installed in this box's venv, so the web app couldn't be run here; web edits
+    were verified by `py_compile` + `node --check` + DB round-trip, not a live boot.
+
 - **2026-07-20 (upload quality):** clips were going out at ~5.8 Mbps, which
   YouTube's own re-encode then crushed further. Fixed end to end:
   - Source: `FMT_SORT` now prefers **VP9** over h264 at 1080p (more detail at

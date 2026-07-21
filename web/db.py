@@ -65,10 +65,14 @@ def init_db() -> None:
             id TEXT PRIMARY KEY, user_id TEXT, status TEXT NOT NULL DEFAULT 'queued',
             stage TEXT, progress INTEGER NOT NULL DEFAULT 0, clips TEXT NOT NULL DEFAULT '[]',
             error INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL, is_upload INTEGER NOT NULL DEFAULT 0,
-            opts TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            opts TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, thumb TEXT);
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at);
         CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_events(user_id, created_at);
         """)
+        # Idempotent migration for DBs created before the hero-thumbnail column.
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(jobs)")}
+        if "thumb" not in cols:
+            c.execute("ALTER TABLE jobs ADD COLUMN thumb TEXT")
 
 
 # ── users ────────────────────────────────────────────────────────────────────

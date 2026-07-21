@@ -1,5 +1,5 @@
 # PROJECT_MAP — youtube-shorts-clipper
-_Generated 2026-07-20 by scripts/build_memory.py — do not edit by hand._
+_Generated 2026-07-21 by scripts/build_memory.py — do not edit by hand._
 
 ## clipper.py
   - _LoL YouTube Shorts Clipper — turn a YouTube VOD into 9:16 highlight clips._
@@ -16,6 +16,7 @@ _Generated 2026-07-20 by scripts/build_memory.py — do not edit by hand._
   - `has_existing_captions(video, start, dur, dims)` — True if the source already has captions, so we don't add a duplicate layer:
   - `write_metadata(clip, title_base, idx, platform, hook, meta)` — Write a sidecar .txt with a ready-to-paste title + caption for the
   - `make_thumbnail(video, start, dur, peak_pos, idx, clip_out, title, transcript)` — AI thumbnail for a freshly cut clip, taken from the CLEAN source video
+  - `make_hero_thumbnail(video, moments, dims, title, transcript, out_path)` — ONE hero thumbnail for the whole source, composed like a per-clip thumb.
   - `rethumb_all()` — Regenerate thumbnails for every rendered clip in clips/ — no re-render,
   - `cut_clip(video, start, dur, idx, layout, caption, subs, dims, cap_size, peak_pos, facecam_override, title, platform, ai_meta, thumbs)`
   - `make_clips(video)` — Full local pipeline on a downloaded video. Shared by CLI + web.

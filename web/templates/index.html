@@ -83,6 +83,9 @@
   .checkbox input{width:auto;accent-color:var(--accent)}
 
   .results{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:16px;margin-top:8px}
+  .hero{grid-column:1/-1;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px;text-align:center}
+  .hero h4{margin:0 0 10px;font-size:13px;color:var(--muted, #9a9a9a);font-weight:600;letter-spacing:.04em}
+  .hero img{max-width:100%;max-height:420px;border-radius:10px;border:1px solid var(--line);display:block;margin:0 auto}
   video{width:100%;border-radius:10px;background:#252525;aspect-ratio:9/16;object-fit:cover;border:1px solid var(--line)}
   .dl{display:block;text-align:center;margin-top:8px;color:#5ab0ff;font-size:14px}
   .meta{width:100%;margin-top:8px;padding:8px;background:var(--surface-2);border:1px solid var(--line);
@@ -269,6 +272,22 @@ function poll(id){
       clearInterval(t); $('go').disabled=false;
       if(s.error){ $('form-msg').textContent = s.stage; $('bar').hidden=true; return; }
       $('bar').value=100;
+      // One hero thumbnail for the whole video, shown prominently above the clips.
+      if(s.thumb){
+        const h = document.createElement('div');
+        h.className = 'hero';
+        const cap = document.createElement('h4');
+        cap.textContent = 'Hero thumbnail';
+        const hi = document.createElement('img');
+        hi.src = '/clips/' + s.thumb;
+        hi.alt = 'Auto-generated hero thumbnail for this video';
+        hi.loading = 'lazy';
+        const ha = document.createElement('a');
+        ha.className = 'dl'; ha.href = '/clips/' + s.thumb; ha.download = '';
+        ha.textContent = 'Download thumbnail';
+        h.append(cap, hi, ha);
+        $('results').appendChild(h);
+      }
       (s.clips||[]).forEach((name,i) => {
         const d = document.createElement('div');
         const v = document.createElement('video');

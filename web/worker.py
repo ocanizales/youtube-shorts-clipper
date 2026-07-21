@@ -39,7 +39,7 @@ def process(job: dict) -> None:
             db.update_job(jid, stage=f"Cutting clip {done}/{total}",
                           progress=50 + int(done / total * 50))
 
-        clips = clipper.make_clips(
+        clips, hero = clipper.make_clips(
             video, max_clips=opts["max_clips"], clip_len=opts["clip_len"],
             peak_pos=opts["peak_pos"], layout=opts["layout"],
             caption=opts.get("caption") or None, subs=opts.get("subtitles", False),
@@ -47,7 +47,8 @@ def process(job: dict) -> None:
             platform=opts.get("platform", "youtube"), progress=cut)
 
         db.update_job(jid, status="done", stage="Done", progress=100,
-                      clips=[c.name for c in clips])
+                      clips=[c.name for c in clips],
+                      thumb=hero.name if hero else None)
         if job["user_id"]:  # meter usage only on success
             db.record_usage(job["user_id"], jid)
     except Exception as e:

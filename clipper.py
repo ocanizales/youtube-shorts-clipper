@@ -764,6 +764,38 @@ def make_thumbnail(video: Path, start: float, dur: int, peak_pos: float,
         return None
 
 
+def make_hero_thumbnail(video: Path, moments, dims, title: str,
+                        transcript: str | None, out_path: Path,
+                        *, peak_pos: float, clip_len: int):
+    """ONE hero thumbnail for the whole source, composed like a per-clip thumb.
+
+    Samples frames around the audio peak of each hype moment off the CLEAN source
+    (no burned captions) and keeps the single best-scoring frame (sharp + colorful
+    + well-exposed) — i.e. the most thumbnail-worthy instant of the video. This
+    picks by frame score across the moments rather than the raw audio rank because
+    ``find_hype_moments`` returns its moments time-sorted, and visual score is a
+    better predictor of a compelling thumbnail than loudness alone. Never fails the
+    job — returns ``out_path`` or ``None``.
+    """
+    if not moments:
+        return None
+    try:
+        cands = []
+        for m in moments:
+            peak = m + peak_pos * clip_len           # where the spike sits in each clip
+            cands += [max(0.0, peak + o) for o in (-1.5, -0.5, 0.5, 1.5)]
+        img = _pick_frame(video, cands)
+        if img is None:
+            print("[hero] no frame extracted — skipped")
+            return None
+        _compose_thumb(img, _hook_text(title, transcript), out_path)
+        print(f"[hero] {out_path}")
+        return out_path
+    except Exception as ex:
+        print(f"[hero] failed ({ex.__class__.__name__}: {ex})")
+        return None
+
+
 def _uncrop_916(img):
     """Recover a 16:9 action canvas from a rendered 9:16 clip frame.
     zoom clips have a pure-black caption bar up top (and a sharp HUD band at
@@ -811,7 +843,7 @@ def rethumb_all():
 def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
              cap_size=66, peak_pos=0.65, facecam_override=None,
              title="Highlight", platform="youtube", ai_meta=True,
-             thumbs=True) -> Path:
+             thumbs=False) -> Path:
     out = CLIPS_DIR / f"short_{idx:02d}_{int(start)}s.mp4"
     src_w, src_h = dims
 
@@ -876,8 +908,14 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
 
 def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="full",
                caption=None, subs=False, cap_size=66, title="Highlight",
-               platform="youtube", progress=None, ai_meta=True, thumbs=True) -> list[Path]:
-    """Full local pipeline on a downloaded video. Shared by CLI + web."""
+               platform="youtube", progress=None, ai_meta=True, thumbs=True
+               ) -> tuple[list[Path], Path | None]:
+    """Full local pipeline on a downloaded video. Shared by CLI + web.
+
+    Returns ``(clips, hero)`` — the rendered clips plus ONE hero thumbnail for the
+    whole source (or ``None`` if disabled/unavailable). Per-clip thumbnails are no
+    longer produced; ``thumbs`` now gates the single hero thumb.
+    """
     dims = _dims(video)
     moments = find_hype_moments(video, clip_len, max_clips, peak_pos)
     clips = []
@@ -885,10 +923,15 @@ def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="
         clips.append(cut_clip(video, t, clip_len, i, layout, caption, subs, dims,
                               cap_size=cap_size, peak_pos=peak_pos,
                               title=title, platform=platform, ai_meta=ai_meta,
-                              thumbs=thumbs))
+                              thumbs=False))          # no per-clip thumbs; hero below
         if progress:
             progress(i, len(moments))
-    return clips
+    hero = None
+    if thumbs and clips:
+        hero = make_hero_thumbnail(video, moments, dims, title, None,
+                                   CLIPS_DIR / f"hero_{video.stem}.jpg",
+                                   peak_pos=peak_pos, clip_len=clip_len)
+    return clips, hero
 
 
 # ── 4. YouTube (only for --draft / --list-channels) ──────────────────────────
@@ -961,7 +1004,7 @@ def main():
     p.add_argument("--no-ai-meta", action="store_true",
                    help="skip Ollama title/description generation (falls back to hook titles)")
     p.add_argument("--no-thumbs", action="store_true",
-                   help="skip AI thumbnail generation (<clip>_thumb.jpg next to each clip)")
+                   help="skip the hero thumbnail (clips/hero_<source>.jpg, one per video)")
     p.add_argument("--rethumb", action="store_true",
                    help="regenerate thumbnails for existing clips in clips/, then exit")
     p.add_argument("--draft", action="store_true", help="ALSO upload as PRIVATE drafts")
@@ -978,13 +1021,15 @@ def main():
 
     print(f"\n=== LoL Clipper ===\n{a.max_clips} x {a.clip_len}s | layout={a.layout}\n")
     video = download_video(a.url)
-    clips = make_clips(video, max_clips=a.max_clips, clip_len=a.clip_len,
-                       peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
-                       subs=a.subtitles, cap_size=a.cap_size,
-                       title=a.title, platform=a.platform, ai_meta=not a.no_ai_meta,
-                       thumbs=not a.no_thumbs)
+    clips, hero = make_clips(video, max_clips=a.max_clips, clip_len=a.clip_len,
+                             peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
+                             subs=a.subtitles, cap_size=a.cap_size,
+                             title=a.title, platform=a.platform, ai_meta=not a.no_ai_meta,
+                             thumbs=not a.no_thumbs)
 
     print(f"\n[done] {len(clips)} clips in ./{CLIPS_DIR}/")
+    if hero:
+        print(f"[done] hero thumbnail: ./{hero}")
     if a.draft:
         show_channel()
         for i, c in enumerate(clips, 1):
