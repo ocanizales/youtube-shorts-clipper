@@ -85,6 +85,27 @@ def test_ease_clamps_out_of_range_targets():
     assert abs(xs_lo[-1]) < 1.0, "x settles at the clamped lower bound"
 
 
+def test_write_sendcmd_format(tmp_path=None):
+    import tempfile, os, re
+    d = tempfile.mkdtemp()
+    p = pathlib.Path(d) / "t.cmd"
+    times = np.array([0.0, 1.0])
+    xs = np.array([100.0, 400.0])
+    c._write_sendcmd(times, xs, p)
+    lines = [ln for ln in p.read_text().splitlines() if ln.strip()]
+    assert len(lines) >= int(c.CMD_FPS * 0.9), "should densify to ~CMD_FPS commands/sec"
+    assert all(re.fullmatch(r"\d+\.\d+ crop@dyn x \d+;", ln) for ln in lines), "line format"
+    ts = [float(ln.split()[0]) for ln in lines]
+    assert ts == sorted(ts), "commands must be time-sorted"
+    xvals = [int(ln.split()[-1].rstrip(";")) for ln in lines]
+    assert abs(xvals[0] - 100) <= 1, "first command near start x"
+    # densification must actually INTERPOLATE, not repeat the first value:
+    # x should ramp monotonically from ~100 toward ~400 across the file.
+    assert xvals[0] < xvals[len(xvals) // 2] < xvals[-1], "x must ramp (interpolated), not repeat"
+    assert xvals[-1] >= 350, "last command near the end x (~400)"
+    os.remove(p)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

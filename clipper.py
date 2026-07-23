@@ -343,6 +343,23 @@ def _ease(targets_px: np.ndarray, src_w: int, crop_w: int,
     return xs
 
 
+def _write_sendcmd(times: np.ndarray, xs: np.ndarray, path: Path) -> Path:
+    """Write an ffmpeg sendcmd script driving `crop@dyn`'s x.
+
+    sendcmd applies each command as a step (no interpolation), so we densify the
+    eased path to CMD_FPS by linear interpolation — small per-frame steps read as
+    a smooth pan.
+    """
+    if len(times) >= 2:
+        dense_t = np.arange(float(times[0]), float(times[-1]), 1.0 / CMD_FPS)
+        dense_x = np.interp(dense_t, times, xs)
+    else:
+        dense_t, dense_x = times, xs
+    lines = [f"{t:.3f} crop@dyn x {int(round(x))};" for t, x in zip(dense_t, dense_x)]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
 def _esc(text: str) -> str:
     return text.replace("\\", "\\\\").replace(":", R"\:").replace("'", R"’")
 
