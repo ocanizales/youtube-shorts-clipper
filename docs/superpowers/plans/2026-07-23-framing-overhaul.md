@@ -366,8 +366,12 @@ def test_write_sendcmd_format(tmp_path=None):
     assert all(re.fullmatch(r"\d+\.\d+ crop@dyn x \d+;", ln) for ln in lines), "line format"
     ts = [float(ln.split()[0]) for ln in lines]
     assert ts == sorted(ts), "commands must be time-sorted"
-    first_x = int(lines[0].split()[-1].rstrip(";"))
-    assert abs(first_x - 100) <= 1, "first command near start x"
+    xvals = [int(ln.split()[-1].rstrip(";")) for ln in lines]
+    assert abs(xvals[0] - 100) <= 1, "first command near start x"
+    # densification must actually INTERPOLATE, not repeat the first value:
+    # x should ramp monotonically from ~100 toward ~400 across the file.
+    assert xvals[0] < xvals[len(xvals) // 2] < xvals[-1], "x must ramp (interpolated), not repeat"
+    assert xvals[-1] >= 350, "last command near the end x (~400)"
     os.remove(p)
 ```
 
