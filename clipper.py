@@ -614,7 +614,7 @@ def _read_sidecar(clip: Path) -> dict:
 # grade it (saturation/contrast/vignette), punch in, and overlay a 2-3 word
 # ALL-CAPS hook (culture word bank -> Ollama -> title fallback). Design rules
 # from CTR research live in obsidian1 Sources/Web (LoL thumbnail design note).
-THUMB_W, THUMB_H = 1280, 720  # YouTube canvas; shows on channel grid + search
+THUMB_W, THUMB_H = 1080, 1920  # vertical 9:16 Shorts cover — matches the clips
 THUMB_HOOK_WORDS = 3          # research says <=3-5 words; cap hard for legibility
 THUMB_GOLD = (255, 200, 0)    # last-word accent: gold on dark is the LoL palette
 
@@ -706,41 +706,240 @@ def _hook_text(title: str, transcript: str | None) -> str:
     return " ".join(words[:THUMB_HOOK_WORDS]) or "MUST SEE"
 
 
-def _compose_thumb(img, hook: str, out: Path):
-    """Grade + punch in + hook -> 1280x720 JPEG well under YouTube's 2MB cap.
-    Numbers follow the CTR research: ~1.25x punch-in so subjects read at feed
-    size, saturation/contrast lifted to survive feed compression, vignette to
-    pull the eye center, text top-LEFT (YouTube stamps its duration badge
-    bottom-right), white with a heavy black stroke, last word gold."""
-    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
-    w, h = img.size
-    cw, ch = int(w / 1.25), int(h / 1.25)
-    img = img.crop(((w - cw) // 2, (h - ch) // 2, (w + cw) // 2, (h + ch) // 2))
-    img = img.resize((THUMB_W, THUMB_H), Image.LANCZOS)
-    img = ImageEnhance.Color(img).enhance(1.35)
-    img = ImageEnhance.Contrast(img).enhance(1.12)
-    img = ImageEnhance.Sharpness(img).enhance(1.5)
-    mask = Image.new("L", (THUMB_W, THUMB_H), 0)
-    ImageDraw.Draw(mask).ellipse((-THUMB_W // 3, -THUMB_H // 3,
-                                  THUMB_W * 4 // 3, THUMB_H * 4 // 3), fill=255)
-    mask = mask.filter(ImageFilter.GaussianBlur(120))
-    img = Image.composite(img, ImageEnhance.Brightness(img).enhance(0.62), mask)
+# -- creative vertical thumbnail: helpers ------------------------------------
+EMOJI_FONT = next((p for p in (
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+) if os.path.exists(p)), None)
 
-    d = ImageDraw.Draw(img)
-    size, font = 150, None
-    while size > 60:                      # shrink-to-fit within 90% of the width
-        font = _thumb_font(size)
-        if d.textlength(hook, font=font) <= THUMB_W * 0.90:
+# themed emoji picked from the hook, longest/most-specific keys first
+THUMB_EMOJI = (("PENTA", "💥"), ("QUADRA", "💥"), ("ACE", "💥"), ("STEAL", "🔥"),
+               ("BARON", "🐉"), ("DRAGON", "🐉"), ("BACKDOOR", "🚪"),
+               ("CLUTCH", "⚔️"), ("OUTPLAY", "⚔️"), ("1V", "⚔️"), ("IQ", "🧠"),
+               ("THROW", "💀"), ("COMEBACK", "🔥"), ("INSANE", "🔥"))
+
+
+def _cover(img, size):
+    """Resize + center-crop so `img` fully covers `size` (no letterboxing)."""
+    from PIL import Image
+    tw, th = size
+    w, h = img.size
+    s = max(tw / w, th / h)
+    r = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS)
+    x, y = (r.width - tw) // 2, (r.height - th) // 2
+    return r.crop((x, y, x + tw, y + th))
+
+
+def _rounded_mask(size, radius):
+    from PIL import Image, ImageDraw
+    m = Image.new("L", size, 0)
+    ImageDraw.Draw(m).rounded_rectangle((0, 0, size[0] - 1, size[1] - 1),
+                                        radius=radius, fill=255)
+    return m
+
+
+def _radial(size, cx, cy, r_in, r_out, inner=255, outer=0):
+    """L-mode radial ramp: `inner` inside r_in, fading to `outer` past r_out."""
+    from PIL import Image
+    w, h = size
+    yy, xx = np.ogrid[:h, :w]
+    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    t = np.clip((dist - r_in) / max(1, (r_out - r_in)), 0, 1)
+    return Image.fromarray((inner + (outer - inner) * t).astype(np.uint8), "L")
+
+
+def _wrap_hook(draw, text, fnt, max_w):
+    """Greedy word-wrap of the hook to fit `max_w` px per line."""
+    words, lines, cur = text.split(), [], ""
+    for wd in words:
+        t = (cur + " " + wd).strip()
+        if draw.textlength(t, font=fnt) <= max_w or not cur:
+            cur = t
+        else:
+            lines.append(cur)
+            cur = wd
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _burst(size, cx, cy, color, n=18, seed=0):
+    """Transparent layer of soft radial light rays fanning out from (cx, cy)."""
+    import math
+    from PIL import Image, ImageDraw, ImageFilter
+    layer = Image.new("RGBA", size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    R = max(size) * 1.4
+    base = (seed * 2.399963) % (2 * math.pi)     # golden-angle phase per clip
+    for i in range(n):
+        a = base + i * (2 * math.pi / n)
+        p1 = (cx + R * math.cos(a - 0.16), cy + R * math.sin(a - 0.16))
+        p2 = (cx + R * math.cos(a + 0.16), cy + R * math.sin(a + 0.16))
+        d.polygon([(cx, cy), p1, p2], fill=color + (26,))
+    return layer.filter(ImageFilter.GaussianBlur(6))
+
+
+def _pick_emoji(hook: str) -> str:
+    h = hook.upper()
+    for key, em in THUMB_EMOJI:
+        if key in h:
+            return em
+    return "🔥"
+
+
+def _emoji_img(ch: str, px: int):
+    """A color emoji as an RGBA image ~px tall (None if the font is missing)."""
+    if not EMOJI_FONT:
+        return None
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        f = ImageFont.truetype(EMOJI_FONT, 109)     # NotoColorEmoji: fixed strike
+        layer = Image.new("RGBA", (160, 160), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).text((80, 80), ch, font=f, embedded_color=True,
+                                   anchor="mm")
+        bbox = layer.getbbox()
+        if not bbox:
+            return None
+        layer = layer.crop(bbox)
+        s = px / max(layer.size)
+        return layer.resize((max(1, int(layer.width * s)),
+                             max(1, int(layer.height * s))), Image.LANCZOS)
+    except Exception:
+        return None
+
+
+def _paste_emoji(base, em, cx, cy, tilt=0):
+    """Alpha-composite an emoji centered at (cx, cy) with a soft glow halo."""
+    if em is None:
+        return
+    from PIL import Image, ImageFilter
+    if tilt:
+        em = em.rotate(tilt, expand=True, resample=Image.BICUBIC)
+    halo = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    halo.alpha_composite(em, (cx - em.width // 2, cy - em.height // 2))
+    base.alpha_composite(halo.filter(ImageFilter.GaussianBlur(18)))
+    base.alpha_composite(em, (cx - em.width // 2, cy - em.height // 2))
+
+
+def _compose_thumb(img, hook: str, out: Path, seed_key: str | None = None):
+    """Compose a creative vertical 9:16 Shorts thumbnail (1080x1920) from a clean
+    landscape source frame — an ACTUAL edited picture, not a captioned screenshot:
+
+      • ambient backdrop  — the frame blown up to fill 9:16, blurred + dimmed
+      • energy            — a warm spotlight + gold light-ray burst behind the card
+      • hero card         — the graded, punched-in frame as a white-bordered,
+                            glowing, drop-shadowed, slightly tilted 'sticker'
+      • emoji badge        — 🔥/💥/⚔️/🐉 chosen from the hook, filling the top
+      • hook               — 2-3 words, wrapped, ALL-CAPS, heavy stroke, gold accent
+                            word + gold underline, over a bottom scrim
+      • finish            — film grain + vignette for a processed, edited feel
+
+    Per-clip variation (tilt direction, ray phase, grain) is seeded from
+    `seed_key` (defaults to the output name) so a batch never looks copy-pasted.
+    Stays a JPEG well under YouTube's 2 MB cap.
+    """
+    import hashlib
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+    seed = int(hashlib.md5((seed_key or str(out)).encode()).hexdigest()[:8], 16)
+    tilt = -3.2 if seed % 2 else 3.2
+    W, H, gold = THUMB_W, THUMB_H, THUMB_GOLD
+    hx, hy = W // 2, int(H * 0.43)
+
+    # 1) ambient backdrop: the frame blown up to fill 9:16, blurred + dimmed
+    bg = _cover(img, (W, H)).filter(ImageFilter.GaussianBlur(55))
+    bg = ImageEnhance.Brightness(bg).enhance(0.5)
+    bg = ImageEnhance.Color(bg).enhance(1.25)
+    # 2) warm spotlight + gold ray burst where the hero card will land
+    spot = _radial((W, H), hx, hy, 120, 1000, inner=120, outer=0)
+    bg = Image.composite(ImageEnhance.Brightness(bg).enhance(1.7), bg, spot)
+    bg = bg.convert("RGBA")
+    bg.alpha_composite(_burst((W, H), hx, hy, gold, seed=seed))
+
+    # 3) hero card: graded, punched-in frame as a bordered, glowing, tilted sticker
+    hero = ImageEnhance.Color(img).enhance(1.4)
+    hero = ImageEnhance.Contrast(hero).enhance(1.14)
+    hero = ImageEnhance.Sharpness(hero).enhance(1.7)
+    w, h = hero.size
+    cw, ch = int(w / 1.14), int(h / 1.14)
+    hero = hero.crop(((w - cw) // 2, (h - ch) // 2, (w + cw) // 2, (h + ch) // 2))
+    sw, sh = hero.size                           # keep the card landscape even if the
+    if sh / sw > 0.62:                           # source frame is tall -> crop to 16:9
+        nh = int(sw * 9 / 16)
+        hero = hero.crop((0, (sh - nh) // 2, sw, (sh + nh) // 2))
+    HW = 1000
+    HH = max(1, int(HW * hero.height / hero.width))
+    hero = hero.resize((HW, HH), Image.LANCZOS)
+    rad = 34
+    card = Image.new("RGBA", (HW, HH), (0, 0, 0, 0))
+    card.paste(hero, (0, 0), _rounded_mask((HW, HH), rad))
+    ImageDraw.Draw(card).rounded_rectangle((0, 0, HW - 1, HH - 1), radius=rad,
+                                           outline=(255, 255, 255, 255), width=10)
+    card = card.rotate(tilt, expand=True, resample=Image.BICUBIC)
+    gx, gy = hx - card.width // 2, hy - card.height // 2
+    alpha = card.split()[3]
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))          # gold glow behind card
+    sil = Image.new("RGBA", card.size, (0, 0, 0, 0))
+    sil.paste(gold + (255,), (0, 0), alpha)
+    glow.alpha_composite(sil, (gx, gy))
+    bg.alpha_composite(glow.filter(ImageFilter.GaussianBlur(34)))
+    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))        # drop shadow
+    ssil = Image.new("RGBA", card.size, (0, 0, 0, 0))
+    ssil.paste((0, 0, 0, 200), (0, 0), alpha)
+    shadow.alpha_composite(ssil, (gx + 12, gy + 26))
+    bg.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(22)))
+    bg.alpha_composite(card, (gx, gy))
+
+    # 4) themed emoji badge fills the top dead-space, tilted opposite the card
+    _paste_emoji(bg, _emoji_img(_pick_emoji(hook), 240),
+                 W // 2, int(H * 0.135), tilt=-tilt)
+
+    out_img = bg.convert("RGB")
+
+    # 5) bottom scrim so the hook always reads over the busy backdrop
+    ramp = (np.clip((np.arange(H) - H * 0.52) / (H * 0.48), 0, 1) * 210).astype(np.uint8)
+    grad = np.repeat(ramp[:, None], W, axis=1)
+    out_img = Image.composite(Image.new("RGB", (W, H), (8, 8, 12)), out_img,
+                              Image.fromarray(grad))
+
+    # 6) hook — big, wrapped to <=2 lines, ALL-CAPS, heavy stroke, gold accent word
+    d = ImageDraw.Draw(out_img)
+    size = 210
+    while size > 96:
+        f = _thumb_font(size)
+        lines = _wrap_hook(d, hook, f, W - 120)
+        if len(lines) <= 2 and max(d.textlength(l, font=f) for l in lines) <= W - 110:
             break
-        size -= 8
-    x, y, words = 44, 30, hook.split()
-    stroke = max(4, size // 9)
-    for i, wd in enumerate(words):
-        last = i == len(words) - 1 and len(words) > 1
-        d.text((x, y), wd, font=font, fill=THUMB_GOLD if last else (255, 255, 255),
-               stroke_width=stroke, stroke_fill=(0, 0, 0))
-        x += d.textlength(wd + " ", font=font)
-    img.save(out, "JPEG", quality=88)
+        size -= 10
+    f = _thumb_font(size)
+    lines = _wrap_hook(d, hook, f, W - 120)
+    lh = int(size * 1.06)
+    y = int(H * 0.90) - lh * len(lines)
+    stroke = max(6, size // 8)
+    flat, wi = hook.split(), 0
+    for ln in lines:
+        x = (W - d.textlength(ln, font=f)) / 2
+        for wd in ln.split():
+            last = wi == len(flat) - 1          # accent the final (or only) word gold
+            d.text((x, y), wd, font=f, fill=gold if last else (255, 255, 255),
+                   stroke_width=stroke, stroke_fill=(0, 0, 0))
+            x += d.textlength(wd + " ", font=f)
+            wi += 1
+        y += lh
+    uw = min(W - 160, max(280, int(max(d.textlength(l, font=f) for l in lines) * 0.5)))
+    uy = int(H * 0.905)
+    d.rounded_rectangle(((W - uw) // 2, uy, (W + uw) // 2, uy + 12), radius=6, fill=gold)
+
+    # 7) film grain + vignette for a processed, edited feel
+    rng = np.random.default_rng(seed)
+    noise = rng.integers(-10, 11, (H, W, 1)).repeat(3, axis=2).astype(np.int16)
+    out_img = Image.fromarray(
+        np.clip(np.asarray(out_img).astype(np.int16) + noise, 0, 255).astype(np.uint8),
+        "RGB")
+    vig = _radial((W, H), W // 2, int(H * 0.42), int(H * 0.30), int(H * 0.75),
+                  inner=255, outer=70)
+    out_img = Image.composite(out_img, ImageEnhance.Brightness(out_img).enhance(0.5), vig)
+
+    out_img.save(out, "JPEG", quality=90)
     print(f"[thumb] {out}")
 
 
@@ -913,8 +1112,9 @@ def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="
     """Full local pipeline on a downloaded video. Shared by CLI + web.
 
     Returns ``(clips, hero)`` — the rendered clips plus ONE hero thumbnail for the
-    whole source (or ``None`` if disabled/unavailable). Per-clip thumbnails are no
-    longer produced; ``thumbs`` now gates the single hero thumb.
+    whole source (or ``None`` if disabled/unavailable). Each clip also gets its own
+    creative 9:16 thumbnail (``<stem>_thumb.jpg``) so every Short has a ready cover
+    the dashboard can show + offer for download; ``thumbs`` gates both.
     """
     dims = _dims(video)
     moments = find_hype_moments(video, clip_len, max_clips, peak_pos)
@@ -923,7 +1123,7 @@ def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="
         clips.append(cut_clip(video, t, clip_len, i, layout, caption, subs, dims,
                               cap_size=cap_size, peak_pos=peak_pos,
                               title=title, platform=platform, ai_meta=ai_meta,
-                              thumbs=False))          # no per-clip thumbs; hero below
+                              thumbs=thumbs))          # per-clip 9:16 cover each
         if progress:
             progress(i, len(moments))
     hero = None

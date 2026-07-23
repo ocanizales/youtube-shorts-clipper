@@ -2,6 +2,33 @@
 _Last updated: 2026-07-21 (viral upgrade). Update me before every session end._
 
 ## Current state
+- **2026-07-22 (creative vertical thumbnails):** thumbnails were landscape
+  1280x720 screenshots with a text overlay; user wanted them "creative, in short
+  format, actual edited pictures." `_compose_thumb` rewritten to build a designed
+  **vertical 9:16 (1080x1920)** composite from the clean landscape source frame:
+  ambient blurred+dimmed backdrop, warm spotlight + gold light-ray burst, the
+  graded/punched-in frame as a white-bordered, glowing, drop-shadowed, tilted
+  **sticker card**, a themed **color emoji badge** (🔥/💥/⚔️/🐉, picked from the
+  hook via `_pick_emoji`; NotoColorEmoji `embedded_color=True`, degrades to none
+  if missing), a big wrapped ALL-CAPS hook (gold accent word + underline) over a
+  bottom scrim, then film grain + vignette. Per-clip variation (tilt/ray-phase/
+  grain) is md5-seeded from the output name so a batch never looks copy-pasted.
+  New PIL/numpy helpers: `_cover` `_rounded_mask` `_radial` `_wrap_hook` `_burst`
+  `_pick_emoji`/`_emoji_img`/`_paste_emoji`. Hero card is clamped to landscape
+  (crop to 16:9 when the source frame is tall) so a portrait input can't blow it
+  up. `THUMB_W,THUMB_H` now `1080,1920`. Verified: `--rethumb` on the 3 live clips
+  + a direct `make_thumbnail` call, each 1080x1920 ~0.6 MB, viewed by eye.
+  - **Re-enabled PER-CLIP thumbnails.** The viral upgrade had switched to ONE
+    `hero_<source>.jpg` per URL and `cut_clip(thumbs=False)`; but the
+    project-dashboard `/clipper` lists every clip as its own downloadable Short and
+    keys on `<stem>_thumb.jpg`, so fresh renders showed NO thumbnail there.
+    `make_clips` now passes `thumbs=thumbs` to `cut_clip` (each clip gets its own
+    9:16 cover) **and** still writes the hero (the Flask `web/app.py` uses it);
+    `--no-thumbs` disables both. This reverses the "per-clip thumbs dropped" default
+    — flagged for the user in case the hero-only design was intentional.
+  - Dashboard side (project-dashboard `app.py`, separate repo): `/clipper` now
+    serves `.jpg` from `/clips/` (guard + content-type), lists each clip's `thumb`,
+    and uses it as the `<video poster>` (both 9:16) plus a "⬇ Thumbnail" button.
 - **2026-07-21 (viral upgrade, branch `viral-upgrade`):** three standing
   defaults, each verified with the repo's synthetic-render style.
   - **One hero thumbnail per URL** (not per clip). Per-clip `*_thumb.jpg` are gone
