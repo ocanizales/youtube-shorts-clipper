@@ -266,6 +266,42 @@ def focus_x(video: Path, start: float, dur: int, src_w: int, src_h: int,
     return max(0, min(x, src_w - crop_w))
 
 
+def _column_motion(frames: np.ndarray) -> np.ndarray:
+    """Per-column motion over time, with distractor regions masked out.
+
+    `frames` is (nf, SH, SW) gray. Returns (nf-1, SW): the absolute inter-frame
+    difference, summed over rows, AFTER zeroing the bottom-right minimap corner
+    and the bottom HUD strip so their constant animation can't attract the crop.
+    """
+    diff = np.abs(np.diff(frames, axis=0))            # (nf-1, SH, SW)
+    mm_h, mm_w = int(SH * MINIMAP_FRAC), int(SW * MINIMAP_FRAC)
+    hud_h = int(SH * HUD_MASK_FRAC)
+    if mm_h and mm_w:
+        diff[:, SH - mm_h:, SW - mm_w:] = 0           # minimap corner
+    if hud_h:
+        diff[:, SH - hud_h:, :] = 0                   # ability/HUD strip
+    return diff.sum(axis=1)                            # (nf-1, SW)
+
+
+def _motion_profile(video: Path, start: float, dur: int) -> tuple[np.ndarray, np.ndarray]:
+    """Decode a downscaled gray clip; return (times, per-column motion over time).
+
+    One ffmpeg pass at SAMPLE_FPS. times has length nf-1 (one per motion frame);
+    profile is (nf-1, SW). Returns empties if the clip is too short to diff.
+    """
+    raw = subprocess.run(
+        [_FFMPEG, "-ss", str(start), "-i", str(video), "-t", str(dur),
+         "-vf", f"fps={SAMPLE_FPS},scale={SW}:{SH},format=gray",
+         "-f", "rawvideo", "-"], capture_output=True).stdout
+    nf = len(raw) // (SW * SH)
+    if nf < 2:
+        return np.zeros(0), np.zeros((0, SW))
+    frames = np.frombuffer(raw[:nf * SW * SH], np.uint8).reshape(nf, SH, SW).astype(np.int16)
+    profile = _column_motion(frames)
+    times = np.arange(profile.shape[0]) / SAMPLE_FPS
+    return times, profile
+
+
 def _esc(text: str) -> str:
     return text.replace("\\", "\\\\").replace(":", R"\:").replace("'", R"’")
 
@@ -273,6 +309,18 @@ def _esc(text: str) -> str:
 SPLIT_TOP_FRAC = 0.42  # facecam occupies the top portion of the 9:16 canvas
 ZOOM_TOP_FRAC  = 0.105  # zoom: black caption bar height (fraction of the 9:16 canvas)
 ZOOM_HUD_FRAC  = 0.19   # zoom: bottom slice of the SOURCE treated as the game HUD strip
+
+# ── framing / tracking tunables (docs/superpowers/specs/2026-07-23-...) ──────
+SW, SH            = 240, 135  # downscaled analysis grid (cols, rows)
+SAMPLE_FPS        = 6         # motion-sampling rate for the crop trajectory
+CENTER_SIGMA_FRAC = 0.30      # width of the center-bias Gaussian (frac of SW)
+MINIMAP_FRAC      = 0.23      # bottom-right box masked out (frac of W & H)
+HUD_MASK_FRAC     = 0.16      # bottom strip masked out (frac of H)
+DEADZONE_FRAC     = 0.06      # hold still while target stays within this frac of src_w
+EASE_ALPHA        = 0.18      # exponential ease toward target per sample
+MAX_PAN_PX_PER_S  = None      # velocity cap; None -> src_w * 0.6
+CMD_FPS           = 15        # sendcmd densification rate (pan smoothness)
+CAP_SIZE_TRACKED  = 84        # caption size bump for crop/zoom layouts
 
 
 def _even(v) -> int:
