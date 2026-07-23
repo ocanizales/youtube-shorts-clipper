@@ -302,6 +302,25 @@ def _motion_profile(video: Path, start: float, dur: int) -> tuple[np.ndarray, np
     return times, profile
 
 
+def _aim_targets(profile: np.ndarray, win: int) -> np.ndarray:
+    """Per frame, the left column of the width-`win` window with the most
+    center-biased motion. A broad Gaussian centered on the frame center weights
+    the profile (the game camera already centers the champion), so the aim
+    prefers the middle unless off-center action is genuinely stronger.
+    """
+    nf, sw = profile.shape
+    cols = np.arange(sw)
+    bias = np.exp(-0.5 * ((cols - (sw - 1) / 2.0) / (CENTER_SIGMA_FRAC * sw)) ** 2)
+    biased = profile * bias[None, :]
+    kernel = np.ones(win)
+    out = np.empty(nf, dtype=int)
+    default_left = (sw - win) // 2
+    for i in range(nf):
+        sums = np.convolve(biased[i], kernel, "valid")   # len sw-win+1
+        out[i] = int(np.argmax(sums)) if sums.max() > 0 else default_left
+    return out
+
+
 def _esc(text: str) -> str:
     return text.replace("\\", "\\\\").replace(":", R"\:").replace("'", R"’")
 
