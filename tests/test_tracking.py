@@ -63,13 +63,26 @@ def test_ease_deadzone_holds():
     assert np.ptp(xs) < 1.0, "small jitter inside the deadzone must not move the crop"
 
 
-def test_ease_velocity_capped_and_clamped():
+def test_ease_velocity_capped():
     src_w, crop_w = 1920, 600
     targets = np.array([0, 1320, 1320, 1320], dtype=float)  # a huge jump then hold
     max_step = 100.0
     xs = c._ease(targets, src_w, crop_w, deadzone_px=0.06 * src_w, max_step_px=max_step)
     assert np.all(np.abs(np.diff(xs)) <= max_step + 1e-6), "per-step motion must be capped"
-    assert xs.min() >= 0 and xs.max() <= src_w - crop_w, "x must stay in range"
+
+
+def test_ease_clamps_out_of_range_targets():
+    # targets far outside the valid crop range must never push x past the edges,
+    # regardless of the velocity cap. Isolates the clamp guard: without np.clip,
+    # x would run away to the raw target value (9999 / -9999).
+    src_w, crop_w = 1920, 600
+    hi = src_w - crop_w
+    xs_hi = c._ease(np.full(60, 9999.0), src_w, crop_w, deadzone_px=0.0, max_step_px=1e9)
+    assert xs_hi.max() <= hi + 1e-6, "x must never exceed the upper bound"
+    assert abs(xs_hi[-1] - hi) < 1.0, "x settles at the clamped upper bound"
+    xs_lo = c._ease(np.full(60, -9999.0), src_w, crop_w, deadzone_px=0.0, max_step_px=1e9)
+    assert xs_lo.min() >= -1e-6, "x must never go below 0"
+    assert abs(xs_lo[-1]) < 1.0, "x settles at the clamped lower bound"
 
 
 if __name__ == "__main__":
