@@ -37,16 +37,22 @@ def test_aim_targets_follows_moving_blob():
     assert np.all(np.diff(tgt) >= 0), "aim should be monotonic for a monotonic blob"
 
 
-def test_aim_targets_center_bias_breaks_ties():
+def test_aim_targets_center_bias_prefers_central_action():
+    # equal-magnitude action at center and off-center; the width-`win` window
+    # can only capture one, so the center bias must make the CENTRAL one win.
+    # (Replaces a symmetric two-blob "tie" test whose loose OR-assertion passed
+    # even when the aim landed at the far edge — it did not verify the bias.)
     SW = c.SW
-    prof = np.zeros((1, SW))
-    prof[0, 5:15] = 100.0                    # equal blob at far left
-    prof[0, SW - 15:SW - 5] = 100.0          # and far right
     win = 40
+    center = SW // 2
+    prof = np.zeros((1, SW))
+    prof[0, center - 3:center + 3] = 100.0     # central action
+    prof[0, 10:16] = 100.0                      # equal off-center action (far left)
     left = int(c._aim_targets(prof, win)[0])
     center_left = (SW - win) // 2
-    assert abs(left - center_left) < abs(left - 0) or abs(left - center_left) < abs(left - (SW - win)), \
-        "center bias should pull a symmetric tie toward the middle"
+    assert abs(left - center_left) <= win // 2, (
+        f"center bias should pick the central window (got left={left}, "
+        f"expected ~{center_left})")
 
 
 if __name__ == "__main__":
