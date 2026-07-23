@@ -55,6 +55,23 @@ def test_aim_targets_center_bias_prefers_central_action():
         f"expected ~{center_left})")
 
 
+def test_ease_deadzone_holds():
+    src_w, crop_w = 1920, 600
+    base = 500.0
+    targets = base + np.array([0, 20, -15, 10, -20, 5], dtype=float)  # jitter < deadzone
+    xs = c._ease(targets, src_w, crop_w, deadzone_px=0.06 * src_w, max_step_px=1e9)
+    assert np.ptp(xs) < 1.0, "small jitter inside the deadzone must not move the crop"
+
+
+def test_ease_velocity_capped_and_clamped():
+    src_w, crop_w = 1920, 600
+    targets = np.array([0, 1320, 1320, 1320], dtype=float)  # a huge jump then hold
+    max_step = 100.0
+    xs = c._ease(targets, src_w, crop_w, deadzone_px=0.06 * src_w, max_step_px=max_step)
+    assert np.all(np.abs(np.diff(xs)) <= max_step + 1e-6), "per-step motion must be capped"
+    assert xs.min() >= 0 and xs.max() <= src_w - crop_w, "x must stay in range"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

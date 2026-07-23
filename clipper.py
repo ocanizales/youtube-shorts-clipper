@@ -321,6 +321,28 @@ def _aim_targets(profile: np.ndarray, win: int) -> np.ndarray:
     return out
 
 
+def _ease(targets_px: np.ndarray, src_w: int, crop_w: int,
+          deadzone_px: float, max_step_px: float) -> np.ndarray:
+    """Turn a noisy per-sample target into a smooth crop-x path.
+
+    Holds position while the target stays within `deadzone_px` of the current x
+    (kills micro-jitter); otherwise eases toward it by EASE_ALPHA, capped at
+    `max_step_px` per sample so it glides instead of snapping. Clamped to the
+    valid crop range.
+    """
+    lo, hi = 0.0, float(max(0, src_w - crop_w))
+    xs = np.empty(len(targets_px), dtype=float)
+    cur = float(np.clip(targets_px[0], lo, hi)) if len(targets_px) else lo
+    for i, raw in enumerate(targets_px):
+        tgt = float(np.clip(raw, lo, hi))
+        if abs(tgt - cur) > deadzone_px:
+            step = EASE_ALPHA * (tgt - cur)
+            step = max(-max_step_px, min(max_step_px, step))
+            cur = min(hi, max(lo, cur + step))
+        xs[i] = cur
+    return xs
+
+
 def _esc(text: str) -> str:
     return text.replace("\\", "\\\\").replace(":", R"\:").replace("'", R"’")
 
