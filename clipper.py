@@ -413,9 +413,10 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
         return 8, (H + full_video_height(dims)) // 2 + 24
     if layout == "fit":        # on the bottom blurred bar, clear of gameplay
         return 2, int(H * 0.07)
-    if layout == "zoom":       # inside the black caption bar above the playfield
-        return 8, max(24, int(H * ZOOM_TOP_FRAC * 0.30))
-    return 2, int(H * 0.24)    # crop: lower third, above the bottom HUD
+    if layout == "zoom":       # lower third: just above the bottom HUD strip
+        _, _, _, hud_out_h, _, _ = zoom_geometry(dims)
+        return 2, hud_out_h + int(H * 0.03)
+    return 2, int(H * 0.16)    # crop: lower third, above the source's bottom HUD
 
 
 def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin,
@@ -1158,6 +1159,10 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         zw = zoom_geometry(dims)[-1] if layout == "zoom" else None
         crop_x, track_cmd = track_path(video, start, dur, src_w, src_h, crop_w=zw)
 
+    # Tracked layouts fill the whole 1080 width, so captions can be bigger and
+    # still clear the action — the user's clips read as "captions very far".
+    cap_size_eff = max(cap_size, CAP_SIZE_TRACKED) if layout in ("crop", "zoom") else cap_size
+
     # Don't add captions if the source is already captioned (avoids duplicates).
     if subs and has_existing_captions(video, start, dur, dims):
         print(f"[clip {idx}] source already has captions; skipping added captions")
@@ -1168,12 +1173,12 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         tmp = CLIPS_DIR / f".raw_{idx}.mp4"
         ff("-y", "-ss", str(start), "-i", str(video), "-t", str(dur), "-c", "copy", str(tmp))
         an, margin = caption_anchor(layout, dims)     # placement is decided by layout
-        ass_path, hook, transcript = make_dynamic_captions(tmp, an, margin, max(48, cap_size))
+        ass_path, hook, transcript = make_dynamic_captions(tmp, an, margin, max(48, cap_size_eff))
         tmp.unlink(missing_ok=True)
 
     cap_an, cap_margin = caption_anchor(layout, dims)
     vf = build_vf(layout, dims, crop_x, facecam, ass_path, caption,
-                  cap_size, cap_an, cap_margin, sendcmd=track_cmd)
+                  cap_size_eff, cap_an, cap_margin, sendcmd=track_cmd)
     if QUALITY == "max":
         # Only at max: a mild unsharp before the color tag. The pipeline upscales
         # heavily onto 1080x1920 and YouTube's re-encode softens edges; this keeps
