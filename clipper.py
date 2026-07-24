@@ -418,7 +418,8 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
     return 2, int(H * 0.24)    # crop: lower third, above the bottom HUD
 
 
-def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin) -> str:
+def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin,
+             sendcmd=None) -> str:
     src_w, src_h = dims
     if layout == "split" and facecam:        # facecam on top, gameplay on bottom
         fx, fy, fw, fh = facecam
@@ -442,12 +443,15 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an,
         _, play_h, top_bar, hud_out_h, mid_h, cw = zoom_geometry(dims)
         hud_src_h = src_h - play_h
         vf = (f"split=2[pf][hs];"
-              f"[pf]crop={cw}:{play_h}:{crop_x}:0,scale={W}:{mid_h}[game];"
+              f"[pf]crop@dyn=w={cw}:h={play_h}:x={crop_x}:y=0,scale={W}:{mid_h}[game];"
               f"[hs]crop={src_w}:{hud_src_h}:0:{play_h},scale={W}:{hud_out_h}[hud];"
               f"[game][hud]vstack=inputs=2,pad={W}:{H}:0:{top_bar}:black")
     else:                                    # motion-tracked 9:16 crop
         cw = min(int(src_h * 9 / 16), src_w)
-        vf = f"crop={cw}:{src_h}:{crop_x}:0,scale={W}:{H}"
+        vf = f"crop@dyn=w={cw}:h={src_h}:x={crop_x}:y=0,scale={W}:{H}"
+    if sendcmd:                              # feed crop@dyn's x live -> a smooth pan
+        p = str(sendcmd).replace("\\", "/").replace(":", R"\:")
+        vf = f"sendcmd=f='{p}',{vf}"
     if ass_path:                             # dynamic word-by-word captions
         p = str(ass_path).replace("\\", "/").replace(":", R"\:")
         vf += f",ass='{p}'"
@@ -1149,10 +1153,10 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         if not facecam:                          # no face -> show the whole video instead
             print(f"[clip {idx}] no facecam detected; falling back to full-video layout")
             layout = "full"
-    crop_x = 0
+    crop_x, track_cmd = 0, None
     if layout in ("crop", "zoom"):           # zoom tracks with its own (narrower) window
         zw = zoom_geometry(dims)[-1] if layout == "zoom" else None
-        crop_x = focus_x(video, start, dur, src_w, src_h, crop_w=zw, spike_frac=peak_pos)
+        crop_x, track_cmd = track_path(video, start, dur, src_w, src_h, crop_w=zw)
 
     # Don't add captions if the source is already captioned (avoids duplicates).
     if subs and has_existing_captions(video, start, dur, dims):
@@ -1169,7 +1173,7 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
 
     cap_an, cap_margin = caption_anchor(layout, dims)
     vf = build_vf(layout, dims, crop_x, facecam, ass_path, caption,
-                  cap_size, cap_an, cap_margin)
+                  cap_size, cap_an, cap_margin, sendcmd=track_cmd)
     if QUALITY == "max":
         # Only at max: a mild unsharp before the color tag. The pipeline upscales
         # heavily onto 1080x1920 and YouTube's re-encode softens edges; this keeps
@@ -1193,6 +1197,8 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
        "-movflags", "+faststart", str(out))
     if ass_path:
         ass_path.unlink(missing_ok=True)
+    if track_cmd:                                # remove the temp sendcmd pan script
+        track_cmd.unlink(missing_ok=True)
     meta = _ollama_metadata(transcript, idx) if (ai_meta and transcript) else None
     write_metadata(out, title, idx, platform, hook, meta)   # title + caption sidecar
     if thumbs:                                   # AI thumbnail from the clean source
