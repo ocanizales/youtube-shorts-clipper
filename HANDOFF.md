@@ -1,7 +1,49 @@
 # HANDOFF — youtube-shorts-clipper
-_Last updated: 2026-07-21 (viral upgrade). Update me before every session end._
+_Last updated: 2026-07-24 (framing overhaul). Update me before every session end._
 
 ## Current state
+- **2026-07-24 (framing overhaul, branch `framing-overhaul`):** the 9:16 reframing
+  "looked at no one" and felt sluggish, captions read as far from the action.
+  Root cause: `focus_x()` returned **one** static crop-x for the whole clip, scored
+  by raw pixel-motion (minions/particles/**minimap** attract it, not the champion).
+  - **Static `focus_x` → eased `track_path()`.** Same single downscaled-gray decode,
+    but the time axis is kept: a per-column motion profile over time →
+    center-biased sliding-window aim (a broad Gaussian, σ=`CENTER_SIGMA_FRAC`,
+    exploits that the game camera already centers the champion) with the
+    **minimap corner** and **bottom HUD strip** masked out (`MINIMAP_FRAC`,
+    `HUD_MASK_FRAC`) → an eased path (deadzone hold `DEADZONE_FRAC` + exponential
+    low-pass `EASE_ALPHA` + velocity cap `MAX_PAN_PX_PER_S`) → an ffmpeg **`sendcmd`
+    script** that drives a named **`crop@dyn`** filter's `x` live (densified to
+    `CMD_FPS` — sendcmd is stepwise, not interpolated, so we interpolate in Python).
+    Returns `(x0, script_path)`; `script_path is None` = constant path (short/blank
+    clip or action never leaves the deadzone) → caller renders a plain static crop.
+    Decomposed helpers: `_motion_profile` / `_column_motion` / `_aim_targets` /
+    `_ease` / `_write_sendcmd` / `track_path`. Applies to **both** tracked layouts
+    (`crop` and `zoom`, the latter with its narrower `zoom_geometry` window).
+    `build_vf` gained `sendcmd=None`; `cut_clip` calls `track_path`, threads the
+    script, and unlinks it after render (like the `.ass` cleanup).
+  - **Captions → lower-third safe band, bigger.** `caption_anchor` now returns
+    bottom-anchored (an=2) lower-third margins for `crop` (`H*0.16`) and `zoom`
+    (just above the HUD strip, `hud_out_h + H*0.03`) — zoom was in the **top black
+    bar**, physically far from the action. `cut_clip` bumps tracked-layout caption
+    size to `CAP_SIZE_TRACKED` (84). `split`/`full`/`fit` anchors unchanged; the
+    HUD is not "key gameplay" so captioning over it honors the hard rule.
+  - **`--sample` zoom harness.** `python clipper.py --sample <URL_or_FILE> [--at S]`
+    renders a labeled comparison set to `clips/samples/` — **static vs eased** across
+    `SAMPLE_ZOOMS` (1.0/1.25/1.5× punch-in), `SAMPLE_DUR`=12s each, so the user picks
+    the zoom by eye. `build_vf`'s crop branch gained an optional `crop_w` that keeps
+    9:16 and re-centers vertically (a real punch-in, not a horizontal stretch);
+    `crop_w=None` is byte-identical to the old production crop (no regression).
+    `make_sample`/`_render_sample` do the work.
+  - **Tests** (repo standalone-script convention, no pytest):
+    `.venv/bin/python tests/test_tracking.py` (10 unit tests: masks, aim center-bias,
+    ease deadzone/velocity/clamp, sendcmd densify+ramp, track_path fallback/script),
+    `tests/test_tracking_render.py` (end-to-end: sendcmd pan keeps a moving subject
+    on screen AND beats a static crop — differential, so a frozen crop can't pass),
+    `tests/test_captions.py`, `tests/test_sample.py`. All green; `import clipper` ok.
+  - **Awaiting user:** pick a zoom level from the delivered `clips/samples/*.mp4`,
+    then bake the winner as the crop default. **Not pushed / not merged to master.**
+    Design + plan under `docs/superpowers/{specs,plans}/2026-07-23-*`.
 - **2026-07-22 (creative vertical thumbnails):** thumbnails were landscape
   1280x720 screenshots with a text overlay; user wanted them "creative, in short
   format, actual edited pictures." `_compose_thumb` rewritten to build a designed

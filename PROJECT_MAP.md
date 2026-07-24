@@ -1,16 +1,16 @@
 # PROJECT_MAP — youtube-shorts-clipper
-_Generated 2026-07-23 by scripts/build_memory.py — do not edit by hand._
+_Generated 2026-07-24 by scripts/build_memory.py — do not edit by hand._
 
 ## clipper.py
   - _LoL YouTube Shorts Clipper — turn a YouTube VOD into 9:16 highlight clips._
   - `ff(*args)`
   - `download_video(url, on_progress)` — Download the best video+audio up to 1080p (any container), merged.
   - `find_hype_moments(video, clip_len, top_n, peak_pos)`
-  - `focus_x(video, start, dur, src_w, src_h, crop_w, spike_frac)` — Return the left x (px) of the crop window that captures the most action.
+  - `track_path(video, start, dur, src_w, src_h, crop_w)` — Eased crop-x trajectory that follows the action (replaces focus_x).
   - `zoom_geometry(dims)` — Band plan for the 'zoom' layout (the Korean solo-queue Short look):
   - `full_video_height(dims)` — Height (px) of the source frame when scaled to the full 1080 width.
   - `caption_anchor(layout, dims)` — Where captions belong for each layout, as (ASS alignment, margin px).
-  - `build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin)`
+  - `build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin, sendcmd, crop_w)`
   - `make_dynamic_captions(clip, an, margin_v, fontsize)` — Transcribe spoken words and write an .ass with word-by-word reveal where the
   - `detect_facecam(video, start, dur, src_w, src_h)` — Best-effort: find a streamer facecam box via face detection on sampled frames.
   - `has_existing_captions(video, start, dur, dims)` — True if the source already has captions, so we don't add a duplicate layer:
@@ -20,6 +20,7 @@ _Generated 2026-07-23 by scripts/build_memory.py — do not edit by hand._
   - `rethumb_all()` — Regenerate thumbnails for every rendered clip in clips/ — no re-render,
   - `cut_clip(video, start, dur, idx, layout, caption, subs, dims, cap_size, peak_pos, facecam_override, title, platform, ai_meta, thumbs)`
   - `make_clips(video)` — Full local pipeline on a downloaded video. Shared by CLI + web.
+  - `make_sample(video, at)` — Render a labeled framing comparison set to clips/samples/ so the user can
   - `show_channel()`
   - `upload_draft(clip, title, idx)`
   - `main()`
@@ -33,6 +34,32 @@ _Generated 2026-07-23 by scripts/build_memory.py — do not edit by hand._
 
 ## serve.py
   - _Local dev launcher: starts the job worker AND the web server together._
+
+## tests/test_captions.py
+  - _Caption placement. Run: .venv/bin/python tests/test_captions.py_
+  - `test_crop_captions_bottom_lower_third()`
+  - `test_zoom_captions_above_hud_not_top_bar()`
+
+## tests/test_sample.py
+  - _Sample harness renders a labeled comparison set._
+  - `test_make_sample_writes_comparison_set()`
+
+## tests/test_tracking.py
+  - _Standalone tracking-logic tests. Run: .venv/bin/python tests/test_tracking.py_
+  - `test_column_motion_masks_minimap_corner()`
+  - `test_column_motion_masks_hud_strip()`
+  - `test_aim_targets_follows_moving_blob()`
+  - `test_aim_targets_center_bias_prefers_central_action()`
+  - `test_ease_deadzone_holds()`
+  - `test_ease_velocity_capped()`
+  - `test_ease_clamps_out_of_range_targets()`
+  - `test_write_sendcmd_format(tmp_path)`
+  - `test_track_path_static_fallback_when_no_motion(monkeypatch)`
+  - `test_track_path_moving_writes_script()`
+
+## tests/test_tracking_render.py
+  - _End-to-end: sendcmd-driven crop follows a moving subject._
+  - `test_tracked_crop_follows_moving_bar()`
 
 ## web/app.py
   - _Web front-end for the LoL Shorts Clipper._
