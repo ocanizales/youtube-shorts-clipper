@@ -420,7 +420,7 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
 
 
 def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin,
-             sendcmd=None) -> str:
+             sendcmd=None, crop_w=None) -> str:
     src_w, src_h = dims
     if layout == "split" and facecam:        # facecam on top, gameplay on bottom
         fx, fy, fw, fh = facecam
@@ -448,8 +448,13 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an,
               f"[hs]crop={src_w}:{hud_src_h}:0:{play_h},scale={W}:{hud_out_h}[hud];"
               f"[game][hud]vstack=inputs=2,pad={W}:{H}:0:{top_bar}:black")
     else:                                    # motion-tracked 9:16 crop
-        cw = min(int(src_h * 9 / 16), src_w)
-        vf = f"crop@dyn=w={cw}:h={src_h}:x={crop_x}:y=0,scale={W}:{H}"
+        if crop_w:                           # sample harness punch-in: a tighter 9:16 window
+            cw = min(_even(crop_w), src_w)
+            ch = min(_even(cw * H / W), src_h)   # keep 9:16 so scaling to WxH doesn't distort
+            cy = (src_h - ch) // 2               # re-centered vertically
+        else:                                # production: full-height 9:16 slice
+            cw, ch, cy = min(int(src_h * 9 / 16), src_w), src_h, 0
+        vf = f"crop@dyn=w={cw}:h={ch}:x={crop_x}:y={cy},scale={W}:{H}"
     if sendcmd:                              # feed crop@dyn's x live -> a smooth pan
         p = str(sendcmd).replace("\\", "/").replace(":", R"\:")
         vf = f"sendcmd=f='{p}',{vf}"
@@ -1242,6 +1247,55 @@ def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="
     return clips, hero
 
 
+# ── framing sample harness (pick a zoom level from real renders) ──────────────
+SAMPLE_ZOOMS = (1.0, 1.25, 1.5)   # punch-in multipliers to compare
+SAMPLE_DUR   = 12                 # seconds per sample clip
+
+
+def _render_sample(video: Path, start: float, dur: int, dims, crop_w: int,
+                   eased: bool, out: Path) -> Path:
+    """Render one framing sample (no captions) with a fast encode.
+
+    `eased` renders the sendcmd pan; otherwise the crop freezes at the opening x
+    so the two sit side by side. `crop_w` sets the punch-in: build_vf keeps 9:16
+    and re-centers, so tighter windows read as a genuine zoom, not a stretch.
+    """
+    x0, script = track_path(video, start, dur, dims[0], dims[1], crop_w=crop_w)
+    if not eased:
+        script = None                        # static: freeze at the opening x
+    an, margin = caption_anchor("crop", dims)
+    vf = build_vf("crop", dims, x0, None, None, None, 66, an, margin,
+                  sendcmd=script, crop_w=crop_w)
+    ff("-y", "-ss", str(start), "-i", str(video), "-t", str(dur),
+       "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+       "-pix_fmt", "yuv420p", "-an", str(out))
+    if script:
+        script.unlink(missing_ok=True)
+    return out
+
+
+def make_sample(video: Path, at: float | None = None) -> list[Path]:
+    """Render a labeled framing comparison set to clips/samples/ so the user can
+    pick a zoom level and confirm the eased pan by eye: static vs eased across
+    SAMPLE_ZOOMS punch-in levels."""
+    dims = _dims(video)
+    src_w, src_h = dims
+    start = at if at is not None else find_hype_moments(video, SAMPLE_DUR, 1, 0.5)[0]
+    base_w = min(int(src_h * 9 / 16), src_w)
+    outdir = CLIPS_DIR / "samples"
+    outdir.mkdir(parents=True, exist_ok=True)
+    outs: list[Path] = []
+    for z in SAMPLE_ZOOMS:
+        crop_w = max(2, int(base_w / z) // 2 * 2)      # tighter zoom = narrower crop
+        for eased in (False, True):
+            tag = "eased" if eased else "static"
+            out = outdir / f"sample_{tag}_{z:.2f}x.mp4"
+            _render_sample(video, start, SAMPLE_DUR, dims, crop_w, eased, out)
+            outs.append(out)
+    print(f"[sample] wrote {len(outs)} clips to {outdir}")
+    return outs
+
+
 # ── 4. YouTube (only for --draft / --list-channels) ──────────────────────────
 def _youtube():
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -1318,12 +1372,23 @@ def main():
     p.add_argument("--draft", action="store_true", help="ALSO upload as PRIVATE drafts")
     p.add_argument("--list-channels", action="store_true",
                    help="show which channel --draft would use, then exit")
+    p.add_argument("--sample", metavar="URL_OR_FILE",
+                   help="render a framing/zoom comparison set (static vs eased across "
+                        "punch-in levels) to clips/samples/ instead of full clips, then exit")
+    p.add_argument("--at", type=float, default=None,
+                   help="sample at this many seconds in (default: top audio peak)")
     a = p.parse_args()
 
     if a.list_channels:
         return show_channel()
     if a.rethumb:
         return rethumb_all()
+    if a.sample:
+        src = Path(a.sample)
+        if not src.exists():                 # not a local file -> treat as a URL to fetch
+            src = download_video(a.sample)
+        make_sample(src, at=a.at)
+        return
     if not a.url:
         p.error("a YouTube URL is required (unless using --list-channels or --rethumb)")
 
