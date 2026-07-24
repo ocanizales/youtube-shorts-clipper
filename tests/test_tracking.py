@@ -106,6 +106,36 @@ def test_write_sendcmd_format(tmp_path=None):
     os.remove(p)
 
 
+def test_track_path_static_fallback_when_no_motion(monkeypatch=None):
+    orig = c._motion_profile
+    c._motion_profile = lambda *a, **k: (np.zeros(0), np.zeros((0, c.SW)))
+    try:
+        x0, script = c.track_path(pathlib.Path("x.mp4"), 0, 10, 1920, 1080)
+        crop_w = min(int(1080 * 9 / 16), 1920)
+        assert script is None, "no motion -> no sendcmd script"
+        assert x0 == (1920 - crop_w) // 2, "no motion -> centered static x"
+    finally:
+        c._motion_profile = orig
+
+
+def test_track_path_moving_writes_script():
+    orig = c._motion_profile
+    nf, SW = 30, c.SW
+    prof = np.zeros((nf, SW))
+    times = np.arange(nf) / c.SAMPLE_FPS
+    for i in range(nf):                      # blob crosses the frame
+        col = int((i / (nf - 1)) * (SW - 20)) + 10
+        prof[i, col - 3:col + 3] = 255.0
+    c._motion_profile = lambda *a, **k: (times, prof)
+    try:
+        x0, script = c.track_path(pathlib.Path("x.mp4"), 0, 5, 1920, 1080)
+        assert script is not None and script.exists(), "movement -> a script is written"
+        assert isinstance(x0, int)
+        script.unlink()
+    finally:
+        c._motion_profile = orig
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

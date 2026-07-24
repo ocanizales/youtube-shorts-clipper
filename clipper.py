@@ -229,43 +229,6 @@ def _dims(video: Path) -> tuple[int, int]:
     return int(nums[0]), int(nums[1])
 
 
-def focus_x(video: Path, start: float, dur: int, src_w: int, src_h: int,
-            crop_w=None, spike_frac=0.65) -> int:
-    """
-    Return the left x (px) of the crop window that captures the most action.
-
-    Improvement over a center-of-mass: we slide the actual crop-width window
-    across the per-column motion profile and pick the window with the MOST
-    motion, weighted toward the highlight moment (spike_frac through the clip).
-    Center-of-mass drifts to the middle when motion is on both sides; a sliding
-    window does not.
-    """
-    crop_w = crop_w or min(int(src_h * 9 / 16), src_w)
-    sw, sh, fps = 240, 135, 4
-    raw = subprocess.run(
-        [_FFMPEG, "-ss", str(start), "-i", str(video), "-t", str(dur),
-         "-vf", f"fps={fps},scale={sw}:{sh},format=gray", "-f", "rawvideo", "-"],
-        capture_output=True).stdout
-    nf = len(raw) // (sw * sh)
-    if nf < 2:
-        return (src_w - crop_w) // 2
-    frames = np.frombuffer(raw[:nf * sw * sh], np.uint8).reshape(nf, sh, sw).astype(np.int16)
-    m = np.abs(np.diff(frames, axis=0)).sum(axis=1)          # (nf-1, sw) motion per column
-    t = np.arange(m.shape[0])
-    spike = spike_frac * (m.shape[0] - 1)
-    w = np.exp(-0.5 * ((t - spike) / max(1.0, m.shape[0] * 0.25)) ** 2)  # focus near the climax
-    profile = (m * w[:, None]).sum(axis=0)                   # (sw,) time-weighted column motion
-    if profile.sum() == 0:
-        return (src_w - crop_w) // 2
-    win = max(1, round(crop_w / src_w * sw))
-    if win >= sw:
-        return (src_w - crop_w) // 2
-    sums = np.convolve(profile, np.ones(win), "valid")       # motion captured per window
-    left = int(np.argmax(sums))
-    x = int(left / sw * src_w)
-    return max(0, min(x, src_w - crop_w))
-
-
 def _column_motion(frames: np.ndarray) -> np.ndarray:
     """Per-column motion over time, with distractor regions masked out.
 
@@ -358,6 +321,34 @@ def _write_sendcmd(times: np.ndarray, xs: np.ndarray, path: Path) -> Path:
     lines = [f"{t:.3f} crop@dyn x {int(round(x))};" for t, x in zip(dense_t, dense_x)]
     path.write_text("\n".join(lines) + "\n")
     return path
+
+
+def track_path(video: Path, start: float, dur: int, src_w: int, src_h: int,
+               crop_w: int | None = None) -> tuple[int, Path | None]:
+    """Eased crop-x trajectory that follows the action (replaces focus_x).
+
+    Returns (x0, script_path). script_path is an ffmpeg sendcmd file driving
+    `crop@dyn`; it is None when the path is effectively constant (short/blank
+    clip, or the action never leaves the deadzone) so the caller can render a
+    plain static crop. Only x moves — height/vertical framing is fixed.
+    """
+    crop_w = crop_w or min(int(src_h * 9 / 16), src_w)
+    center_x = max(0, (src_w - crop_w) // 2)
+    times, profile = _motion_profile(video, start, dur)
+    if profile.shape[0] < 2 or profile.sum() == 0:
+        return center_x, None
+    win = max(1, round(crop_w / src_w * SW))
+    if win >= SW:
+        return center_x, None
+    targets_col = _aim_targets(profile, win)                 # downscaled left col
+    targets_px = targets_col / SW * src_w                    # source px (crop-left)
+    max_step = (MAX_PAN_PX_PER_S or src_w * 0.6) / SAMPLE_FPS
+    xs = _ease(targets_px, src_w, crop_w, DEADZONE_FRAC * src_w, max_step)
+    if float(np.ptp(xs)) < 1.0:                              # never really moves
+        return int(round(xs[0])), None
+    script = CLIPS_DIR / f".track_{int(start)}_{crop_w}.cmd"
+    _write_sendcmd(times, xs, script)
+    return int(round(xs[0])), script
 
 
 def _esc(text: str) -> str:
