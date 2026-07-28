@@ -100,6 +100,11 @@ On upload, post the comment body automatically; pin it by hand.
 - **Manual step:** pinning, a few seconds per upload in Studio (see constraint 5).
 - **FTC disclosure is mandatory** — affiliate relationships must be disclosed clearly.
   Disclosure goes in the comment body and on every page, not buried in a footer.
+- **No engagement bait.** The comment states a fact and offers a link; it never asks
+  for a like, a reply, or a "comment X for Y". Engagement bait is covered by
+  YouTube's spam / deceptive-practices policy, and on a channel whose entire
+  survival case rests on not giving YouTube a reason to act, a few extra clicks is
+  a bad trade. (Added 2026-07-28 from *The Entire Shorts Algorithm Explained*.)
 
 ## Affiliate program selection
 
@@ -154,3 +159,22 @@ unmeasurable and page-building stays guesswork.
    would replace it with a ranked list of which players actually pull views.
 3. **Footage mix** — does the Riot strike history change the pro-VOD weighting, or hold
    course and accept the risk?
+
+   _Updated 2026-07-28._ This is no longer only a copyright question. Pro-VOD clips
+   are **illegible without prior knowledge** — a 1v5 outplay reads as noise to
+   someone who doesn't know the game — so YouTube has to locate a narrow audience
+   before distribution moves at all, which is the slowest possible start for a new
+   channel. And in a saturated niche the ranker favours the most-established
+   channels, which here means **the rights holder itself**: Riot and the official
+   broadcast channels post the same highlights, faster, with better source access,
+   and can additionally strike you. So the pro-VOD lane is crowded by an incumbent
+   who outranks you on trust *and* holds the delete button.
+
+   The fix that follows is **narrowing, not switching**: clips whose appeal is the
+   caster's reaction and a claim-making caption travel to non-players; clips whose
+   appeal is mechanical execution do not. That is the same caption layer already
+   required by the reused-content policy in constraint 4 — one piece of work
+   serving monetization eligibility, legibility to outsiders, and the affiliate
+   funnel. Note the Pro Setup Index does **not** depend on solving this: "<pro>
+   settings" is search demand from people who already play, a different and more
+   durable channel than viral Shorts reach.
