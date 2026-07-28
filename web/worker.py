@@ -44,7 +44,8 @@ def process(job: dict) -> None:
             peak_pos=opts["peak_pos"], layout=opts["layout"],
             caption=opts.get("caption") or None, subs=opts.get("subtitles", False),
             cap_size=opts.get("cap_size", 66), title=opts.get("title", "Highlight"),
-            platform=opts.get("platform", "youtube"), progress=cut)
+            platform=opts.get("platform", "youtube"), progress=cut,
+            teaser=opts.get("teaser", True))
 
         db.update_job(jid, status="done", stage="Done", progress=100,
                       clips=[c.name for c in clips],

@@ -157,17 +157,19 @@
             <div><label for="max_clips">Number of clips</label>
               <input type="number" id="max_clips" name="max_clips" value="5" min="1" max="20"></div>
             <div><label for="clip_len">Length (seconds)</label>
-              <input type="number" id="clip_len" name="clip_len" value="45" min="10" max="90"></div>
+              <input type="number" id="clip_len" name="clip_len" value="30" min="10" max="90"></div>
             <div><label for="layout">Layout</label>
               <select id="layout" name="layout">
                 <option value="full">Full video</option>
                 <option value="crop">Motion track</option>
                 <option value="split">Split screen (facecam)</option>
               </select></div>
-            <div><label for="peak_pos">Build-up: <span id="ppv">65</span>%</label>
-              <input type="range" id="peak_pos" name="peak_pos" min="40" max="85" value="65"
+            <div><label for="peak_pos">Build-up: <span id="ppv">72</span>%</label>
+              <input type="range" id="peak_pos" name="peak_pos" min="40" max="85" value="72"
                      aria-describedby="ppv"></div>
           </div>
+          <label class="checkbox"><input type="checkbox" id="teaser" name="teaser" checked>
+            Cold open — flash the big moment first, then cut back</label>
         </fieldset>
 
         <fieldset>
@@ -254,6 +256,9 @@ $('clip-form').addEventListener('submit', async e => {
 
   const fd = new FormData($('clip-form'));
   fd.set('peak_pos', ($('peak_pos').value/100).toFixed(2));
+  // Sent explicitly: an unchecked box is simply absent from FormData, which the
+  // server would otherwise read as "not specified" and default back to on.
+  fd.set('teaser', $('teaser').checked ? 'on' : 'off');
   if(chosenFile) fd.set('file', chosenFile);
 
   $('go').disabled=true; $('bar').hidden=false; $('bar').value=0;

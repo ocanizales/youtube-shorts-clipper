@@ -2,6 +2,57 @@
 _Last updated: 2026-07-24 (framing overhaul). Update me before every session end._
 
 ## Current state
+- **2026-07-28 (HPC hook overhaul, branch `hpc-hook` off `framing-overhaul`):**
+  clips opened on their least interesting second. Root cause: `find_hype_moments`
+  sets `start = peak − clip_len × peak_pos`, so the first 5s were a pure
+  **arithmetic offset, never scored** — in a pro VOD that's farming/warding/
+  walking. Climax placement was already fine (`peak_pos`); the **hook was
+  unowned**. Four changes, from the HPC formula (Hook/Progression/Climax):
+  - **Cold-open teaser.** A ~1.8s flash of the moment before the spike, hard-cut
+    back to the build-up. `_teaser_window(start, dur, peak_pos)` → the flash ends
+    **0.4s after** the spike (`TEASER_LEAD`=1.4 < `TEASER_DUR`=1.8), so it shows
+    the engage and the caster *starting* to yell but never the outcome — that
+    shortness is why a cold open doesn't break "never pay off early", and
+    `test_teaser_is_short_enough_not_to_resolve` guards the tuning itself.
+    Rendered as a **second `-i` on the same ffmpeg call** and concatenated in the
+    graph, NOT as a separate file: one `loudnorm` (`_LOUDNORM`) then covers both
+    segments — normalizing 1.8s of the loudest audio alone would flatten exactly
+    the punch the teaser exists to deliver — and there's no concat-seam A/V drift.
+    Captions/headline and the `sendcmd` pan stay on the **main branch before the
+    concat**, so `.ass` timings need no shifting. Tracked layouts re-run
+    `track_path` over the teaser window so the flash frames the *fight*, not the
+    walk-in. Grade + BT.709 (`tail`) moved to after the concat so the two
+    segments can never be tagged differently. Off with `--no-teaser`.
+  - **`build_vf(..., suffix="")`.** Two copies of the reframing graph in one
+    `-filter_complex` collided on hard-coded link labels (`[a][b]`, `[bg][fg]`,
+    `[pf][hs]`, `[cam][game]`) **and** on the named `crop@dyn` instance that
+    `_write_sendcmd` addresses. `suffix` renames both; the teaser uses `_t`,
+    production keeps `""`. **`suffix=""` is byte-identical to the pre-change
+    output** — that golden test is the regression guard for the framing work.
+  - **`_refine_start`** — scored opening second. Scans ±`HOOK_SEARCH` (4s) of the
+    per-second energy array `find_hype_moments` already has (no extra decode) and
+    takes the liveliest second, constrained to keep the spike in
+    `[HOOK_PEAK_MIN, HOOK_PEAK_MAX]` = 0.55–0.90 of the clip. Ties break toward
+    nominal — no movement without a reason.
+  - **Defaults: `clip_len` 45 → 30, `peak_pos` 0.65 → 0.72.** 29s of build-up was
+    a long ask and ~35% of every clip ran *after* the peak. New shape: 1.8s
+    teaser + 21.6s build + 8.4s payoff. Changed in **three places that must
+    agree**: `clipper.py` (argparse + `make_clips`/`cut_clip`), `web/app.py`,
+    `web/templates/index.html` (+ a "Cold open" checkbox; the JS sets `teaser`
+    explicitly because an unchecked box is simply absent from FormData).
+  - **Tests:** `tests/test_hook.py` (11 unit: golden byte-identity for all five
+    layouts, label/instance collision, refine-start band + bounds + no-op,
+    teaser-window clamps), `tests/test_teaser_render.py` (end-to-end on a source
+    that is black except around the spike — so a clip that merely got longer, or
+    flashed the wrong moment, cannot pass; plus a render of all four layouts to
+    guard the doubled graph). Whole suite green.
+  - **Not done on purpose:** `PROJECT_MAP.md` NOT regenerated — it has
+    uncommitted WIP in the working tree and `scripts/build_memory.py` would
+    clobber it. Run it once that WIP lands. Plan:
+    `docs/superpowers/plans/2026-07-28-hpc-hook.md`.
+  - **Still open from the previous branch:** the zoom-level pick from
+    `clips/samples/*.mp4` is untouched here, and `framing-overhaul` is still
+    unmerged. **Nothing pushed.**
 - **2026-07-24 (framing overhaul, branch `framing-overhaul`):** the 9:16 reframing
   "looked at no one" and felt sluggish, captions read as far from the action.
   Root cause: `focus_x()` returned **one** static crop-x for the whole clip, scored

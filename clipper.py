@@ -82,6 +82,10 @@ _X264 = {                       # crf, preset, target maxrate, bufsize
 _NVENC_CQ = {"fast": "23", "high": "19", "max": "16"}
 # Appended to every output filter chain so the file is tagged Rec.709 (see cut_clip).
 _BT709 = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
+# One loudness reference for the whole Short. With a cold-open teaser this MUST run
+# after the concat: normalizing 1.8s of the loudest audio in the clip on its own
+# would flatten exactly the punch the teaser exists to deliver.
+_LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
 
 def _pick_encoder() -> list[str]:
@@ -187,6 +191,41 @@ def download_video(url: str, on_progress=None) -> Path:
 
 
 # ── 2. detect hype moments via audio energy ──────────────────────────────────
+# HPC tuning — see docs/superpowers/plans/2026-07-28-hpc-hook.md. The formula is
+# Hook / Progression / Climax: `peak_pos` already placed the climax well, but the
+# opening seconds were a pure arithmetic offset and so were never chosen at all.
+HOOK_SEARCH   = 4      # seconds either side of the nominal start to scan for a livelier open
+HOOK_PEAK_MIN = 0.55   # after refining, the spike must still land this far into the clip...
+HOOK_PEAK_MAX = 0.90   # ...and no later than this, so the payoff never opens the clip
+TEASER_DUR    = 1.8    # cold-open flash length — short enough not to resolve the payoff
+TEASER_LEAD   = 1.4    # flash starts this far before the spike, so it ENDS 0.4s after it
+
+
+def _refine_start(energy: np.ndarray, nominal: int, peak: int,
+                  clip_len: int, n: int) -> int:
+    """Pick the liveliest opening second near `nominal` (HPC's "H").
+
+    `start = peak - clip_len*peak_pos` lands wherever the arithmetic puts it —
+    in a pro VOD that is usually farming, warding or walking, i.e. the clip opens
+    on its least interesting second. Scan +-HOOK_SEARCH around it and take the
+    second with the most audio energy (a shout, an engage call, a ping), so the
+    Short opens on *something*.
+
+    Guarded so the fix can't undo the climax placement: candidates must keep the
+    spike inside [HOOK_PEAK_MIN, HOOK_PEAK_MAX] of the clip and keep the clip
+    inside the video. Ties break toward `nominal` — no movement without a reason.
+    Operates on the per-second energy array find_hype_moments already has, so
+    this costs no extra decode.
+    """
+    fallback = max(0, min(nominal, n - clip_len))
+    lo, hi = max(0, nominal - HOOK_SEARCH), min(n - clip_len, nominal + HOOK_SEARCH)
+    cands = [s for s in range(lo, hi + 1)
+             if HOOK_PEAK_MIN <= (peak - s) / clip_len <= HOOK_PEAK_MAX]
+    if not cands:
+        return fallback
+    return max(cands, key=lambda s: (float(energy[s]), -abs(s - nominal)))
+
+
 def find_hype_moments(video: Path, clip_len: int, top_n: int, peak_pos: float) -> list[float]:
     import librosa
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -207,11 +246,13 @@ def find_hype_moments(video: Path, clip_len: int, top_n: int, peak_pos: float) -
     lead_in = int(clip_len * peak_pos)
     chosen: list[float] = []
     for frame in np.argsort(smoothed)[::-1]:
-        start = float(max(0, int(frame) - lead_in))
+        peak = int(frame)
+        start = max(0, peak - lead_in)
         if start + clip_len > n:
             continue
+        start = _refine_start(smoothed, start, peak, clip_len, n)   # own the hook
         if all(abs(start - s) >= clip_len for s in chosen):
-            chosen.append(start)
+            chosen.append(float(start))
         if len(chosen) >= top_n:
             break
     chosen.sort()
@@ -420,33 +461,47 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
 
 
 def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin,
-             sendcmd=None, crop_w=None) -> str:
+             sendcmd=None, crop_w=None, suffix="") -> str:
+    """Build the 9:16 reframing filter chain for one segment.
+
+    `suffix` is appended to every internal link label AND to the `crop@dyn`
+    filter *instance name*, so two copies of this graph can live in a single
+    `-filter_complex` without colliding (the cold-open teaser renders alongside
+    the main segment). `suffix=""` must stay byte-identical to the pre-teaser
+    output — that identity is the regression guard for the framing work, and it
+    also keeps the production segment's crop named exactly `crop@dyn`, which is
+    the target `_write_sendcmd` addresses.
+    """
     src_w, src_h = dims
+    s = suffix
+    dyn = f"crop@dyn{s}"
     if layout == "split" and facecam:        # facecam on top, gameplay on bottom
         fx, fy, fw, fh = facecam
         top_h, bot_h = int(H * SPLIT_TOP_FRAC), H - int(H * SPLIT_TOP_FRAC)
-        vf = (f"split=2[a][b];"
-              f"[a]crop={fw}:{fh}:{fx}:{fy},"
-              f"scale={W}:{top_h}:force_original_aspect_ratio=increase,crop={W}:{top_h}[cam];"
-              f"[b]scale={W}:{bot_h}:force_original_aspect_ratio=increase,crop={W}:{bot_h}[game];"
-              f"[cam][game]vstack=inputs=2")
+        vf = (f"split=2[a{s}][b{s}];"
+              f"[a{s}]crop={fw}:{fh}:{fx}:{fy},"
+              f"scale={W}:{top_h}:force_original_aspect_ratio=increase,crop={W}:{top_h}[cam{s}];"
+              f"[b{s}]scale={W}:{bot_h}:force_original_aspect_ratio=increase,"
+              f"crop={W}:{bot_h}[game{s}];"
+              f"[cam{s}][game{s}]vstack=inputs=2")
     elif layout == "full":                   # WHOLE video centered, blurred fill above+below
-        vf = (f"split=2[bg][fg];"
-              f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=22:4[b];"
-              f"[fg]scale={W}:-2[v];"
-              f"[b][v]overlay=(W-w)/2:(H-h)/2")  # vertically centered in the 9:16 frame
+        vf = (f"split=2[bg{s}][fg{s}];"
+              f"[bg{s}]scale={W}:{H}:force_original_aspect_ratio=increase,"
+              f"crop={W}:{H},boxblur=22:4[b{s}];"
+              f"[fg{s}]scale={W}:-2[v{s}];"
+              f"[b{s}][v{s}]overlay=(W-w)/2:(H-h)/2")  # centered in the 9:16 frame
     elif layout == "fit":                    # whole frame centered + blurred bars
-        vf = (f"split[bg][fg];[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
-              f"crop={W}:{H},boxblur=22:4[b];"
-              f"[fg]scale={W}:{H}:force_original_aspect_ratio=decrease[f];"
-              f"[b][f]overlay=(W-w)/2:(H-h)/2")
+        vf = (f"split[bg{s}][fg{s}];[bg{s}]scale={W}:{H}:force_original_aspect_ratio=increase,"
+              f"crop={W}:{H},boxblur=22:4[b{s}];"
+              f"[fg{s}]scale={W}:{H}:force_original_aspect_ratio=decrease[f{s}];"
+              f"[b{s}][f{s}]overlay=(W-w)/2:(H-h)/2")
     elif layout == "zoom":                   # punched-in playfield + game HUD re-stacked below
         _, play_h, top_bar, hud_out_h, mid_h, cw = zoom_geometry(dims)
         hud_src_h = src_h - play_h
-        vf = (f"split=2[pf][hs];"
-              f"[pf]crop@dyn=w={cw}:h={play_h}:x={crop_x}:y=0,scale={W}:{mid_h}[game];"
-              f"[hs]crop={src_w}:{hud_src_h}:0:{play_h},scale={W}:{hud_out_h}[hud];"
-              f"[game][hud]vstack=inputs=2,pad={W}:{H}:0:{top_bar}:black")
+        vf = (f"split=2[pf{s}][hs{s}];"
+              f"[pf{s}]{dyn}=w={cw}:h={play_h}:x={crop_x}:y=0,scale={W}:{mid_h}[game{s}];"
+              f"[hs{s}]crop={src_w}:{hud_src_h}:0:{play_h},scale={W}:{hud_out_h}[hud{s}];"
+              f"[game{s}][hud{s}]vstack=inputs=2,pad={W}:{H}:0:{top_bar}:black")
     else:                                    # motion-tracked 9:16 crop
         if crop_w:                           # sample harness punch-in: a tighter 9:16 window
             cw = min(_even(crop_w), src_w)
@@ -454,7 +509,7 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an,
             cy = (src_h - ch) // 2               # re-centered vertically
         else:                                # production: full-height 9:16 slice
             cw, ch, cy = min(int(src_h * 9 / 16), src_w), src_h, 0
-        vf = f"crop@dyn=w={cw}:h={ch}:x={crop_x}:y={cy},scale={W}:{H}"
+        vf = f"{dyn}=w={cw}:h={ch}:x={crop_x}:y={cy},scale={W}:{H}"
     if sendcmd:                              # feed crop@dyn's x live -> a smooth pan
         p = str(sendcmd).replace("\\", "/").replace(":", R"\:")
         vf = f"sendcmd=f='{p}',{vf}"
@@ -1146,10 +1201,25 @@ def rethumb_all():
                        mp4.with_name(mp4.stem + "_thumb.jpg"))
 
 
+def _teaser_window(start: float, dur: int, peak_pos: float) -> tuple[float, float]:
+    """Source window the cold-open flash is cut from: (t0, length).
+
+    Ends TEASER_DUR-TEASER_LEAD (0.4s) *after* the audio spike — the viewer sees
+    the engage and the caster starting to yell, then it's gone. That the flash is
+    too short to show the outcome is the whole reason a cold open doesn't break
+    HPC's "never pay off early": it raises the question instead of answering it.
+    Clamped to the video start and to the clip's own end.
+    """
+    peak = start + peak_pos * dur
+    t0 = max(0.0, peak - TEASER_LEAD)
+    t1 = min(t0 + TEASER_DUR, start + dur)
+    return t0, max(0.0, t1 - t0)
+
+
 def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
-             cap_size=66, peak_pos=0.65, facecam_override=None,
+             cap_size=66, peak_pos=0.72, facecam_override=None,
              title="Highlight", platform="youtube", ai_meta=True,
-             thumbs=False) -> Path:
+             thumbs=False, teaser=True) -> Path:
     out = CLIPS_DIR / f"short_{idx:02d}_{int(start)}s.mp4"
     src_w, src_h = dims
 
@@ -1184,27 +1254,57 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
     cap_an, cap_margin = caption_anchor(layout, dims)
     vf = build_vf(layout, dims, crop_x, facecam, ass_path, caption,
                   cap_size_eff, cap_an, cap_margin, sendcmd=track_cmd)
+    # Applied once to the FINISHED stream, so a teaser and the main segment can
+    # never end up graded or tagged differently.
+    tail = ""
     if QUALITY == "max":
         # Only at max: a mild unsharp before the color tag. The pipeline upscales
         # heavily onto 1080x1920 and YouTube's re-encode softens edges; this keeps
         # HUD/caption edges crisp. Amount kept low (0.4) to avoid halos/ringing.
-        vf += ",unsharp=5:5:0.4:5:5:0.0"
-    vf += "," + _BT709
-    ff("-y",
-       # Lanczos beats ffmpeg's default bicubic on the big upscales this pipeline
-       # does (720/1080 source -> 1080x1920 canvas); keeps HUD text/edges crisp.
-       "-sws_flags", "lanczos+accurate_rnd+full_chroma_int",
-       "-ss", str(start), "-i", str(video), "-t", str(dur),
-       # Tag BT.709 explicitly — untagged uploads get guessed as BT.601 by the
-       # YouTube transcoder, which is what makes clips look washed out/dull.
-       # Done as a filter, not via -color_primaries/-color_trc: this ffmpeg build
-       # silently drops those into the h264 VUI (verified: transfer=unknown).
-       "-vf", vf,
-       *_ENC, "-pix_fmt", "yuv420p",
-       # A keyframe every 2s is what YouTube's ingest wants; avoids re-encode drift.
-       "-force_key_frames", "expr:gte(t,n_forced*2)",
-       "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k",
-       "-movflags", "+faststart", str(out))
+        tail += ",unsharp=5:5:0.4:5:5:0.0"
+    # Tag BT.709 explicitly — untagged uploads get guessed as BT.601 by the
+    # YouTube transcoder, which is what makes clips look washed out/dull. Done as
+    # a filter, not via -color_primaries/-color_trc: this ffmpeg build silently
+    # drops those into the h264 VUI (verified: transfer=unknown).
+    tail += "," + _BT709
+    # Lanczos beats ffmpeg's default bicubic on the big upscales this pipeline
+    # does (720/1080 source -> 1080x1920 canvas); keeps HUD text/edges crisp.
+    common = ["-sws_flags", "lanczos+accurate_rnd+full_chroma_int"]
+    enc = [*_ENC, "-pix_fmt", "yuv420p",
+           # A keyframe every 2s is what YouTube's ingest wants; avoids re-encode drift.
+           "-force_key_frames", "expr:gte(t,n_forced*2)",
+           "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+
+    t0, t_len = _teaser_window(start, dur, peak_pos) if teaser else (0.0, 0.0)
+    if t_len >= 0.5:
+        # HPC hook: a cold-open flash of the moment before the spike, hard-cut
+        # back to the build-up. Rendered as a SECOND INPUT to this same ffmpeg
+        # call and concatenated in the graph — not as a separate file — so one
+        # loudnorm pass covers both segments (see _LOUDNORM) and there is no
+        # concat-seam drift from audio priming samples.
+        t_crop_x = crop_x
+        if layout in ("crop", "zoom"):        # frame the teaser on the FIGHT, not the walk-in
+            zw = zoom_geometry(dims)[-1] if layout == "zoom" else None
+            t_crop_x = track_path(video, t0, max(1, int(round(t_len))),
+                                  src_w, src_h, crop_w=zw)[0]
+        # No captions and no headline on the flash; `suffix` keeps its link labels
+        # and its crop@dyn instance from colliding with the main segment's (whose
+        # crop@dyn is what the sendcmd script addresses by name).
+        tvf = build_vf(layout, dims, t_crop_x, facecam, None, None,
+                       cap_size_eff, cap_an, cap_margin, suffix="_t")
+        fc = (f"[0:v]{tvf}[tv];[1:v]{vf}[mv];"
+              f"[tv][mv]concat=n=2:v=1:a=0{tail}[vo];"
+              f"[0:a][1:a]concat=n=2:v=0:a=1,{_LOUDNORM}[ao]")
+        ff("-y", *common,
+           "-ss", str(t0), "-t", str(t_len), "-i", str(video),
+           "-ss", str(start), "-t", str(dur), "-i", str(video),
+           "-filter_complex", fc, "-map", "[vo]", "-map", "[ao]",
+           *enc, str(out))
+    else:
+        ff("-y", *common,
+           "-ss", str(start), "-i", str(video), "-t", str(dur),
+           "-vf", vf + tail, "-af", _LOUDNORM,
+           *enc, str(out))
     if ass_path:
         ass_path.unlink(missing_ok=True)
     if track_cmd:                                # remove the temp sendcmd pan script
@@ -1218,10 +1318,10 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
     return out
 
 
-def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="full",
+def make_clips(video: Path, *, max_clips=5, clip_len=30, peak_pos=0.72, layout="full",
                caption=None, subs=False, cap_size=66, title="Highlight",
-               platform="youtube", progress=None, ai_meta=True, thumbs=True
-               ) -> tuple[list[Path], Path | None]:
+               platform="youtube", progress=None, ai_meta=True, thumbs=True,
+               teaser=True) -> tuple[list[Path], Path | None]:
     """Full local pipeline on a downloaded video. Shared by CLI + web.
 
     Returns ``(clips, hero)`` — the rendered clips plus ONE hero thumbnail for the
@@ -1236,7 +1336,7 @@ def make_clips(video: Path, *, max_clips=5, clip_len=45, peak_pos=0.65, layout="
         clips.append(cut_clip(video, t, clip_len, i, layout, caption, subs, dims,
                               cap_size=cap_size, peak_pos=peak_pos,
                               title=title, platform=platform, ai_meta=ai_meta,
-                              thumbs=thumbs))          # per-clip 9:16 cover each
+                              thumbs=thumbs, teaser=teaser))   # per-clip 9:16 cover each
         if progress:
             progress(i, len(moments))
     hero = None
@@ -1347,9 +1447,12 @@ def main():
     p = argparse.ArgumentParser(description="Cut a YouTube VOD into 9:16 Shorts clips.")
     p.add_argument("url", nargs="?", help="YouTube video URL")
     p.add_argument("--max-clips", type=int, default=5, help="clips to produce (5)")
-    p.add_argument("--clip-len", type=int, default=45, help="seconds per clip (45)")
-    p.add_argument("--peak-pos", type=float, default=0.65,
-                   help="spike position 0-1; higher = longer build-up (0.65)")
+    p.add_argument("--clip-len", type=int, default=30, help="seconds per clip (30)")
+    p.add_argument("--peak-pos", type=float, default=0.72,
+                   help="spike position 0-1; higher = longer build-up (0.72)")
+    p.add_argument("--no-teaser", action="store_true",
+                   help="skip the cold-open flash of the moment before the spike "
+                        "(on by default; it is what owns the first seconds)")
     p.add_argument("--layout", choices=["crop", "full", "split", "zoom"], default="full",
                    help="full=whole video, captions under it (default); crop=motion-tracked "
                         "zoom; split=facecam on top + gameplay on bottom (auto-detects facecam); "
@@ -1397,6 +1500,7 @@ def main():
     clips, hero = make_clips(video, max_clips=a.max_clips, clip_len=a.clip_len,
                              peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
                              subs=a.subtitles, cap_size=a.cap_size,
+                             teaser=not a.no_teaser,
                              title=a.title, platform=a.platform, ai_meta=not a.no_ai_meta,
                              thumbs=not a.no_thumbs)
 

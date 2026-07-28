@@ -92,8 +92,10 @@ def process():
 
     opts = {
         "max_clips": max(1, min(int(request.form.get("max_clips", 5)), 20)),
-        "clip_len": max(5, min(int(request.form.get("clip_len", 45)), 90)),
-        "peak_pos": float(request.form.get("peak_pos", 0.65)),
+        "clip_len": max(5, min(int(request.form.get("clip_len", 30)), 90)),
+        "peak_pos": float(request.form.get("peak_pos", 0.72)),
+        # HPC cold open — on unless the form explicitly turns it off.
+        "teaser": request.form.get("teaser", "on") in ("on", "1", "true"),
         "layout": request.form.get("layout", "full"),
         "caption": request.form.get("caption", "").strip(),
         "cap_size": int(request.form.get("cap_size", 66)),
