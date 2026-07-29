@@ -7,7 +7,10 @@ split-screen, and Whisper captions. CLI (`clipper.py`) + Flask web app.
 ## Continuity protocol (do this first)
 1. Read `HANDOFF.md` — live work state, open defects, gotchas.
 2. Read `PROJECT_MAP.md` — code map. Regenerate: `python scripts/build_memory.py`.
-3. Before session end / when context fills: update `HANDOFF.md`, commit + push.
+3. Ask `/graphify` before grepping — `graphify-out/GRAPH_REPORT.md` is a
+   queryable code **and docs** graph (god nodes; `graphify affected "X"` gives
+   blast radius). Refreshed by the 6h cron; rebuild now with `graphify update .`.
+4. Before session end / when context fills: update `HANDOFF.md`, commit + push.
 
 ## Run / test
 ```powershell
