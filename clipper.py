@@ -21,6 +21,22 @@ DOWNLOADS_DIR = Path("downloads")
 CLIPS_DIR = Path("clips")
 W, H = 1080, 1920
 
+# Scaler flags for every upscale onto the 1080x1920 canvas.
+#
+# These MUST ride on the scale filter itself (`scale=...:flags=...`). The global
+# `-sws_flags` CLI option was used here until 2026-07-29 and is silently ignored
+# by this ffmpeg build: encoding the same clip with global `lanczos` vs global
+# `bicubic` produced a **byte-identical** decoded stream (md5 bd7b0c47…), while
+# explicit per-filter flags changed it. So every clip rendered before that date
+# used the default scaler, not lanczos, despite the comment claiming otherwise.
+# Exactly the trap already recorded for `-color_primaries` (dropped into the VUI,
+# hence the `setparams` filter): global options here are advisory at best.
+#
+# Measured honestly, lanczos vs bicubic is worth ~9e-5 SSIM against a lossless
+# reference — i.e. nothing visible. This is a correctness fix so the code does
+# what it says, not a quality win. The real speed lever is the x264 preset.
+SCALE_FLAGS = "lanczos"
+
 
 def _resolve_font() -> str:
     """First bold TTF that exists, as a drawtext-safe path (colon escaped).
@@ -74,7 +90,14 @@ _FFMPEG, _FFMPEG_DIR = _resolve_ffmpeg()
 QUALITY = os.environ.get("SHORTS_QUALITY", "high").lower()
 _X264 = {                       # crf, preset, target maxrate, bufsize
     "fast": ("21", "veryfast", "12M", "24M"),
-    "high": ("17", "medium",   "24M", "48M"),
+    # high: preset was `medium` until 2026-07-29. Benchmarked on 20s of real
+    # gameplay against a LOSSLESS lanczos reference: medium 15.3s @ SSIM 0.975409,
+    # faster 10.3s @ 0.975347 — a 32% encode saving for 6e-5 SSIM, which is orders
+    # of magnitude below anything visible. `veryfast` saved 51% and still measured
+    # 0.975232, but `faster` keeps motion-search headroom for busy teamfights,
+    # which is where a weak preset would actually show and where SSIM is least
+    # trustworthy. Encode was 63% of per-clip wall time before this change.
+    "high": ("17", "faster",   "24M", "48M"),
     # max: lowest CRF the upload pipeline benefits from + the slowest preset we'll
     # accept, with headroom on the rate cap so a busy teamfight keeps its detail.
     "max":  ("15", "slower",   "48M", "96M"),
@@ -491,27 +514,27 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an,
         top_h, bot_h = int(H * SPLIT_TOP_FRAC), H - int(H * SPLIT_TOP_FRAC)
         vf = (f"split=2[a{s}][b{s}];"
               f"[a{s}]crop={fw}:{fh}:{fx}:{fy},"
-              f"scale={W}:{top_h}:force_original_aspect_ratio=increase,crop={W}:{top_h}[cam{s}];"
-              f"[b{s}]scale={W}:{bot_h}:force_original_aspect_ratio=increase,"
+              f"scale={W}:{top_h}:force_original_aspect_ratio=increase:flags={SCALE_FLAGS},crop={W}:{top_h}[cam{s}];"
+              f"[b{s}]scale={W}:{bot_h}:force_original_aspect_ratio=increase:flags={SCALE_FLAGS},"
               f"crop={W}:{bot_h}[game{s}];"
               f"[cam{s}][game{s}]vstack=inputs=2")
     elif layout == "full":                   # WHOLE video centered, blurred fill above+below
         vf = (f"split=2[bg{s}][fg{s}];"
               f"[bg{s}]scale={W}:{H}:force_original_aspect_ratio=increase,"
               f"crop={W}:{H},boxblur=22:4[b{s}];"
-              f"[fg{s}]scale={W}:-2[v{s}];"
+              f"[fg{s}]scale={W}:-2:flags={SCALE_FLAGS}[v{s}];"
               f"[b{s}][v{s}]overlay=(W-w)/2:(H-h)/2")  # centered in the 9:16 frame
     elif layout == "fit":                    # whole frame centered + blurred bars
         vf = (f"split[bg{s}][fg{s}];[bg{s}]scale={W}:{H}:force_original_aspect_ratio=increase,"
               f"crop={W}:{H},boxblur=22:4[b{s}];"
-              f"[fg{s}]scale={W}:{H}:force_original_aspect_ratio=decrease[f{s}];"
+              f"[fg{s}]scale={W}:{H}:force_original_aspect_ratio=decrease:flags={SCALE_FLAGS}[f{s}];"
               f"[b{s}][f{s}]overlay=(W-w)/2:(H-h)/2")
     elif layout == "zoom":                   # punched-in playfield + game HUD re-stacked below
         _, play_h, top_bar, hud_out_h, mid_h, cw = zoom_geometry(dims)
         hud_src_h = src_h - play_h
         vf = (f"split=2[pf{s}][hs{s}];"
-              f"[pf{s}]{dyn}=w={cw}:h={play_h}:x={crop_x}:y=0,scale={W}:{mid_h}[game{s}];"
-              f"[hs{s}]crop={src_w}:{hud_src_h}:0:{play_h},scale={W}:{hud_out_h}[hud{s}];"
+              f"[pf{s}]{dyn}=w={cw}:h={play_h}:x={crop_x}:y=0,scale={W}:{mid_h}:flags={SCALE_FLAGS}[game{s}];"
+              f"[hs{s}]crop={src_w}:{hud_src_h}:0:{play_h},scale={W}:{hud_out_h}:flags={SCALE_FLAGS}[hud{s}];"
               f"[game{s}][hud{s}]vstack=inputs=2,pad={W}:{H}:0:{top_bar}:black")
     else:                                    # motion-tracked 9:16 crop
         if crop_w:                           # sample harness punch-in: a tighter 9:16 window
@@ -520,7 +543,7 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an,
             cy = (src_h - ch) // 2               # re-centered vertically
         else:                                # production: full-height 9:16 slice
             cw, ch, cy = min(int(src_h * 9 / 16), src_w), src_h, 0
-        vf = f"{dyn}=w={cw}:h={ch}:x={crop_x}:y={cy},scale={W}:{H}"
+        vf = f"{dyn}=w={cw}:h={ch}:x={crop_x}:y={cy},scale={W}:{H}:flags={SCALE_FLAGS}"
     if sendcmd:                              # feed crop@dyn's x live -> a smooth pan
         p = str(sendcmd).replace("\\", "/").replace(":", R"\:")
         vf = f"sendcmd=f='{p}',{vf}"
@@ -817,12 +840,22 @@ def _thumb_font(size: int):
     return ImageFont.truetype(FONT.replace(R"\:", ":"), size)
 
 
-def _frame_at(video: Path, t: float):
-    """One full-res frame at t seconds as a PIL image (None on failure)."""
+SCORE_W, SCORE_H = 640, 360    # scoring resolution — see _pick_frame
+
+
+def _frame_at(video: Path, t: float, width: int | None = None):
+    """One frame at t seconds as a PIL image (None on failure).
+
+    `width` decodes a scaled-down frame instead of full res. Scoring candidates
+    does not need 1920x1080 — `_frame_score` resizes to 320x180 immediately — and
+    PNG-encoding six full-res frames through a pipe was costing more than it
+    saved. The winner is re-fetched at full res by the caller.
+    """
     import io
     from PIL import Image
+    vf = ["-vf", f"scale={width}:-2:flags=bilinear"] if width else []
     r = subprocess.run([_FFMPEG, "-v", "error", "-ss", f"{max(0, t):.2f}",
-                        "-i", str(video), "-frames:v", "1",
+                        "-i", str(video), "-frames:v", "1", *vf,
                         "-f", "image2pipe", "-vcodec", "png", "-"],
                        capture_output=True)
     return Image.open(io.BytesIO(r.stdout)).convert("RGB") if r.stdout else None
@@ -842,15 +875,23 @@ def _frame_score(img) -> float:
 
 
 def _pick_frame(video: Path, times):
-    """Best-scoring frame among candidate timestamps (None if all fail)."""
-    best, best_s = None, -1.0
+    """Best-scoring frame among candidate timestamps (None if all fail).
+
+    Two passes on purpose: score every candidate at SCORE_W (cheap), then decode
+    ONLY the winner at full resolution. Scoring all of them at full res meant
+    PNG-encoding six 1920x1080 frames through a pipe to look at 320x180 of each.
+    Scores shift a hair versus full-res scoring because ffmpeg does the first
+    downscale instead of PIL, but this is a heuristic picking between frames of
+    the same clip, not a measurement.
+    """
+    best_t, best_s = None, -1.0
     for t in times:
-        img = _frame_at(video, t)
+        img = _frame_at(video, t, width=SCORE_W)
         if img is not None:
             s = _frame_score(img)
             if s > best_s:
-                best, best_s = img, s
-    return best
+                best_t, best_s = t, s
+    return _frame_at(video, best_t) if best_t is not None else None
 
 
 def _ollama_thumb_hook(text: str) -> str | None:
@@ -1296,9 +1337,9 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
     # a filter, not via -color_primaries/-color_trc: this ffmpeg build silently
     # drops those into the h264 VUI (verified: transfer=unknown).
     tail += "," + _BT709
-    # Lanczos beats ffmpeg's default bicubic on the big upscales this pipeline
-    # does (720/1080 source -> 1080x1920 canvas); keeps HUD text/edges crisp.
-    common = ["-sws_flags", "lanczos+accurate_rnd+full_chroma_int"]
+    # NOTE: `-sws_flags` used to live here and was a proven no-op (see SCALE_FLAGS).
+    # Scaler choice now rides on each scale filter, so there is nothing global left.
+    common: list[str] = []
     enc = [*_ENC, "-pix_fmt", "yuv420p",
            # A keyframe every 2s is what YouTube's ingest wants; avoids re-encode drift.
            "-force_key_frames", "expr:gte(t,n_forced*2)",

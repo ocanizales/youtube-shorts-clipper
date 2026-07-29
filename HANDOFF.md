@@ -2,6 +2,41 @@
 _Last updated: 2026-07-24 (framing overhaul). Update me before every session end._
 
 ## Current state
+- **2026-07-29 (render speed — open defect #2, branch `hpc-hook`):** profiled before
+  changing anything. One 30s `crop` clip with subs+thumbs on real 1080p gameplay:
+  | stage | before | after |
+  |---|---|---|
+  | ff:render | 26.3s (63%) | **18.0s** |
+  | make_dynamic_captions (whisper) | 5.8s | 5.2s |
+  | make_thumbnail | 7.0s | ~6.9s |
+  | track_path (×2) | 2.6s | 2.5s |
+  | **total** | **41.9s (1.40× realtime)** | **~33s** |
+  - **First finding: "8 min/clip" was partly cold-start.** The same clip cost 63.9s
+    cold vs 41.9s warm — ~22s is a one-time whisper + Ollama model load per
+    *process*, not per clip, so it amortizes over a batch. Measure clip 2, not clip 1.
+  - **Second finding — a silent quality bug: `-sws_flags` was a NO-OP.** Encoding the
+    same clip with global `lanczos` vs global `bicubic` produced a **byte-identical**
+    decoded stream (md5 `bd7b0c47…`); explicit `scale=…:flags=` changed it. So every
+    clip ever rendered used the default scaler, despite the comment claiming lanczos.
+    **Same trap as `-color_primaries`** (silently dropped into the VUI → needed
+    `setparams`). Scaler flags now ride on each scale filter via `SCALE_FLAGS`, and
+    the blurred `full`/`fit` backdrops deliberately **don't** get lanczos — they are
+    boxblurred immediately after. Two tests pin both halves.
+    Honest note: lanczos vs bicubic measured **9e-5 SSIM** against a lossless
+    reference. This is a correctness fix, not a visible quality win.
+  - **The actual lever was the x264 preset.** 20s of real gameplay vs a lossless
+    lanczos reference: `medium` 15.3s @ SSIM 0.975409 · `faster` 10.3s @ 0.975347 ·
+    `veryfast` 7.5s @ 0.975232. All within 1e-4 — imperceptible. `high` tier moved
+    **medium → faster**: 32% off the encode, confirmed end-to-end (26.3s → 18.0s).
+    Chose `faster` over `veryfast` to keep motion-search headroom for busy
+    teamfights, which is exactly where SSIM is least trustworthy.
+  - **`_pick_frame` was decoding six full-res 1920×1080 PNGs** to score them at
+    320×180. Now scores at `SCORE_W`=640 and re-decodes only the winner at full res.
+    **Only 16% (4.4s → 3.7s)** — the real cost is 7 ffmpeg process spawns, not
+    resolution, so this was aimed at the wrong sub-cost. Kept because it is strictly
+    less work; the remaining win would need one invocation extracting all candidates.
+  - Thumbnail verified by eye after the change (hero card still full-res sharp).
+    Suite 7/7 green. Bench harness left in the session scratchpad, not committed.
 - **2026-07-29 (affiliate end card, branch `hpc-hook`):** Component 2 of
   `docs/superpowers/specs/2026-07-28-affiliate-pro-setup-index-design.md`. Shorts
   has **no clickable surface mid-playback**, so the only route to an affiliate

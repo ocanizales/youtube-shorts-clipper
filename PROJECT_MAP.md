@@ -60,6 +60,8 @@ _Generated 2026-07-29 by scripts/build_memory.py — do not edit by hand._
   - `test_teaser_window_clamps_at_the_video_start()`
   - `test_teaser_window_never_overruns_the_clip()`
   - `test_teaser_is_short_enough_not_to_resolve()` — A guard on the tuning itself, not the code: a cold open that runs long
+  - `test_detail_scales_carry_explicit_scaler_flags()` — Regression guard for a silent quality bug.
+  - `test_blurred_backdrops_do_not_pay_for_lanczos()` — The `full`/`fit` backdrops are boxblurred immediately after scaling, so a
 
 ## tests/test_sample.py
   - _Sample harness renders a labeled comparison set._

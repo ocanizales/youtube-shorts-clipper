@@ -12,24 +12,26 @@ import clipper as c
 DIMS = (1920, 1080)
 FACECAM = (100, 50, 300, 300)
 
-# Captured from build_vf BEFORE the suffix parameter existed. This is the
-# regression guard for the framing/tracking work on `framing-overhaul`: the
-# production path renders with suffix="" and must be byte-identical forever.
+# Pinned output of build_vf. This is the regression guard for the framing/tracking
+# work: the production path renders with suffix="" and any drift must be deliberate.
+# Updated 2026-07-29 when scaler flags moved onto the scale filters (see
+# SCALE_FLAGS) -- the global -sws_flags form was a verified no-op.
 GOLDEN = {
     "split": "split=2[a][b];[a]crop=300:300:100:50,scale=1080:806:"
-             "force_original_aspect_ratio=increase,crop=1080:806[cam];"
-             "[b]scale=1080:1114:force_original_aspect_ratio=increase,"
+             "force_original_aspect_ratio=increase:flags=lanczos,crop=1080:806[cam];"
+             "[b]scale=1080:1114:force_original_aspect_ratio=increase:flags=lanczos,"
              "crop=1080:1114[game];[cam][game]vstack=inputs=2",
     "full": "split=2[bg][fg];[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
-            "crop=1080:1920,boxblur=22:4[b];[fg]scale=1080:-2[v];"
+            "crop=1080:1920,boxblur=22:4[b];[fg]scale=1080:-2:flags=lanczos[v];"
             "[b][v]overlay=(W-w)/2:(H-h)/2",
     "fit": "split[bg][fg];[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
            "crop=1080:1920,boxblur=22:4[b];[fg]scale=1080:1920:"
-           "force_original_aspect_ratio=decrease[f];[b][f]overlay=(W-w)/2:(H-h)/2",
-    "zoom": "split=2[pf][hs];[pf]crop@dyn=w=590:h=874:x=77:y=0,scale=1080:1602[game];"
-            "[hs]crop=1920:206:0:874,scale=1080:116[hud];"
+           "force_original_aspect_ratio=decrease:flags=lanczos[f];[b][f]overlay=(W-w)/2:(H-h)/2",
+    "zoom": "split=2[pf][hs];[pf]crop@dyn=w=590:h=874:x=77:y=0,"
+            "scale=1080:1602:flags=lanczos[game];"
+            "[hs]crop=1920:206:0:874,scale=1080:116:flags=lanczos[hud];"
             "[game][hud]vstack=inputs=2,pad=1080:1920:0:202:black",
-    "crop": "crop@dyn=w=607:h=1080:x=77:y=0,scale=1080:1920",
+    "crop": "crop@dyn=w=607:h=1080:x=77:y=0,scale=1080:1920:flags=lanczos",
 }
 
 
@@ -126,6 +128,30 @@ def test_teaser_is_short_enough_not_to_resolve():
     enough to show the outcome is the exact failure HPC warns about."""
     assert c.TEASER_DUR <= 2.5, "a teaser this long pays the clip off up front"
     assert c.TEASER_LEAD < c.TEASER_DUR, "the flash must reach past the spike onset"
+
+
+def test_detail_scales_carry_explicit_scaler_flags():
+    """Regression guard for a silent quality bug.
+
+    `-sws_flags` as a global CLI option is IGNORED by this ffmpeg build: the same
+    clip encoded with global `lanczos` and global `bicubic` decoded to a
+    byte-identical stream. The scaler must therefore be set on the scale filter
+    itself, or the pipeline quietly falls back to the default and the code comment
+    claiming lanczos becomes fiction.
+    """
+    for layout in ("split", "full", "fit", "zoom", "crop"):
+        vf = c.build_vf(layout, DIMS, 77, FACECAM, None, None, 66, 2, 100)
+        assert f"flags={c.SCALE_FLAGS}" in vf, f"{layout} lost its explicit scaler"
+
+
+def test_blurred_backdrops_do_not_pay_for_lanczos():
+    """The `full`/`fit` backdrops are boxblurred immediately after scaling, so a
+    high-quality scaler there is pure cost for zero visible benefit."""
+    for layout in ("full", "fit"):
+        vf = c.build_vf(layout, DIMS, 77, None, None, None, 66, 2, 100)
+        bg = vf.split("boxblur")[0]
+        assert f"flags={c.SCALE_FLAGS}" not in bg, \
+            f"{layout} is paying for lanczos on a backdrop it is about to blur"
 
 
 if __name__ == "__main__":
