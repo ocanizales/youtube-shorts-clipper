@@ -1,16 +1,16 @@
 # Graph Report - youtube-shorts-clipper  (2026-07-29)
 
 ## Corpus Check
-- 25 files · ~29,959 words
+- 26 files · ~31,082 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 345 nodes · 544 edges · 25 communities (22 shown, 3 thin omitted)
+- 358 nodes · 567 edges · 25 communities (22 shown, 3 thin omitted)
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `8f37d414`
+- Built from commit: `4bb48ae2`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -22,7 +22,7 @@
 - caption_anchor
 - cut_clip
 - Design — Clipper viral upgrade (hero thumbnails, max quality, viral captions)
-- Video Downloading and Media Selection System
+- build_vf
 - Path
 - Sample Generation for Comparison Sets
 - make_clips
@@ -39,19 +39,19 @@
 - Plan — Clipper viral upgrade
 - HANDOFF — youtube-shorts-clipper
 - youtube-shorts-clipper
-- _js_runtime_args
+- _pick_encoder
 
 ## God Nodes (most connected - your core abstractions)
-1. `cut_clip()` - 17 edges
+1. `cut_clip()` - 19 edges
 2. `_compose_thumb()` - 15 edges
 3. `connect()` - 15 edges
-4. `PROJECT_MAP — youtube-shorts-clipper` - 14 edges
+4. `PROJECT_MAP — youtube-shorts-clipper` - 15 edges
 5. `track_path()` - 12 edges
-6. `build_vf()` - 11 edges
+6. `build_vf()` - 12 edges
 7. `Global Constraints` - 11 edges
 8. `Design — Framing overhaul: eased tracking + lower-third captions + zoom sampling` - 10 edges
 9. `caption_anchor()` - 9 edges
-10. `make_clips()` - 9 edges
+10. `_teaser_window()` - 9 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `process()` --calls--> `download_video()`  [EXTRACTED]
@@ -76,7 +76,7 @@ Nodes (42): Connection, get, post, Row, account(), clip(), current_user(), index
 
 ### Community 1 - "test_hook.py"
 Cohesion: 0.11
-Nodes (23): build_vf(), _esc(), Source window the cold-open flash is cut from: (t0, length). Ends TEASER_DUR-…, Pick the liveliest opening second near `nominal` (HPC's "H"). `start = peak -…, Build the 9:16 reframing filter chain for one segment. `suffix` is appended to…, _refine_start(), _teaser_window(), HPC hook-overhaul unit tests. Run: .venv/bin/python tests/test_hook.py Covers… (+15 more)
+Nodes (26): Source window the cold-open flash is cut from: (t0, length). Ends TEASER_DUR-…, Pick the liveliest opening second near `nominal` (HPC's "H"). `start = peak -…, _refine_start(), _teaser_window(), HPC hook-overhaul unit tests. Run: .venv/bin/python tests/test_hook.py Covers…, A guard on the tuning itself, not the code: a cold open that runs long enough…, The loud second before the fight must not be allowed to drag the start so late…, test_refine_start_is_a_noop_on_flat_audio() (+18 more)
 
 ### Community 2 - "Motion Tracking and Path Decoding"
 Cohesion: 0.12
@@ -84,7 +84,7 @@ Nodes (24): _aim_targets(), _column_motion(), _ease(), _motion_profile(), Per-co
 
 ### Community 3 - "clipper.py"
 Cohesion: 0.11
-Nodes (23): _burst(), _compose_thumb(), _cover(), _emoji_img(), _paste_emoji(), _pick_emoji(), _pick_encoder(), _radial() (+15 more)
+Nodes (23): _burst(), _compose_thumb(), _cover(), _emoji_img(), _js_runtime_args(), _paste_emoji(), _pick_emoji(), _radial() (+15 more)
 
 ### Community 4 - "caption_anchor"
 Cohesion: 0.18
@@ -98,9 +98,9 @@ Nodes (13): _ass_ts(), cut_clip(), detect_facecam(), has_existing_captions(), _h
 Cohesion: 0.09
 Nodes (21): Acceptance, Acceptance, Acceptance, Current behaviour, Current behaviour, Current behaviour, Design — Clipper viral upgrade (hero thumbnails, max quality, viral captions), Feature 1 — One hero thumbnail per URL (+13 more)
 
-### Community 7 - "Video Downloading and Media Selection System"
-Cohesion: 0.29
-Nodes (11): _cut(), _duration(), _luma_at(), Path, End-to-end: the cold-open teaser really is prepended, and really is the climax.…, Black everywhere except a bright window straddling the spike, plus audio. Audio…, Mean brightness of the output frame at `t` seconds., The teaser doubles the reframing graph inside one -filter_complex. The tracked… (+3 more)
+### Community 7 - "build_vf"
+Cohesion: 0.13
+Nodes (18): build_vf(), _esc(), Build the 9:16 reframing filter chain for one segment. `suffix` is appended to…, _band_luma(), Path, End-to-end: the affiliate end card appears only over the final seconds. Run:…, Mean brightness of the bottom ENDCARD_BAND strip of the frame at `t`., With a teaser prepended the card must still close the OUTPUT, not fire early at… (+10 more)
 
 ### Community 8 - "Path"
 Cohesion: 0.23
@@ -131,8 +131,8 @@ Cohesion: 0.13
 Nodes (13): 1. What you're selling, 2. Pricing (credit-based SaaS), 3. From local script to hosted SaaS, 4. Cost & margin reality check, 5. Legal / ToS (read before charging money), 6. Go-to-market (first 30 days), Selling the LoL Shorts Clipper, Command line (+5 more)
 
 ### Community 15 - "PROJECT_MAP — youtube-shorts-clipper"
-Cohesion: 0.13
-Nodes (14): clipper.py, Dependencies, PROJECT_MAP — youtube-shorts-clipper, scripts/build_memory.py, serve.py, tests/test_captions.py, tests/test_hook.py, tests/test_sample.py (+6 more)
+Cohesion: 0.12
+Nodes (15): clipper.py, Dependencies, PROJECT_MAP — youtube-shorts-clipper, scripts/build_memory.py, serve.py, tests/test_captions.py, tests/test_endcard.py, tests/test_hook.py (+7 more)
 
 ### Community 18 - "Global Constraints"
 Cohesion: 0.14
@@ -159,24 +159,24 @@ Cohesion: 0.40
 Nodes (4): Continuity protocol (do this first), Hard rules, Run / test, youtube-shorts-clipper
 
 ## Knowledge Gaps
-- **95 isolated node(s):** `setup.sh script`, `1. What you're selling`, `2. Pricing (credit-based SaaS)`, `3. From local script to hosted SaaS`, `4. Cost & margin reality check` (+90 more)
+- **96 isolated node(s):** `setup.sh script`, `1. What you're selling`, `2. Pricing (credit-based SaaS)`, `3. From local script to hosted SaaS`, `4. Cost & margin reality check` (+91 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **3 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `build_vf()` connect `test_hook.py` to `clipper.py`, `caption_anchor`, `cut_clip`, `make_clips`, `Tracked Crop Following Moving Subject in Video Frames`?**
-  _High betweenness centrality (0.014) - this node is a cross-community bridge._
-- **Why does `_teaser_window()` connect `test_hook.py` to `clipper.py`, `cut_clip`, `Video Downloading and Media Selection System`?**
-  _High betweenness centrality (0.013) - this node is a cross-community bridge._
-- **Why does `track_path()` connect `Motion Tracking and Path Decoding` to `clipper.py`, `cut_clip`, `Path`, `make_clips`, `Tracked Crop Following Moving Subject in Video Frames`?**
-  _High betweenness centrality (0.013) - this node is a cross-community bridge._
+- **Why does `cut_clip()` connect `cut_clip` to `test_hook.py`, `Motion Tracking and Path Decoding`, `clipper.py`, `caption_anchor`, `build_vf`, `Path`, `make_clips`, `_pick_frame`?**
+  _High betweenness centrality (0.020) - this node is a cross-community bridge._
+- **Why does `build_vf()` connect `build_vf` to `clipper.py`, `caption_anchor`, `cut_clip`, `make_clips`, `Tracked Crop Following Moving Subject in Video Frames`?**
+  _High betweenness centrality (0.018) - this node is a cross-community bridge._
+- **Why does `_teaser_window()` connect `test_hook.py` to `clipper.py`, `cut_clip`, `build_vf`?**
+  _High betweenness centrality (0.015) - this node is a cross-community bridge._
 - **What connects `setup.sh script`, `1. What you're selling`, `2. Pricing (credit-based SaaS)` to the rest of the system?**
-  _95 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _96 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `db.py` be split into smaller, more focused modules?**
   _Cohesion score 0.10909090909090909 - nodes in this community are weakly interconnected._
 - **Should `test_hook.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.10869565217391304 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.10846560846560846 - nodes in this community are weakly interconnected._
 - **Should `Motion Tracking and Path Decoding` be split into smaller, more focused modules?**
   _Cohesion score 0.12333333333333334 - nodes in this community are weakly interconnected._

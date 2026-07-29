@@ -10,7 +10,7 @@ _Generated 2026-07-29 by scripts/build_memory.py — do not edit by hand._
   - `zoom_geometry(dims)` — Band plan for the 'zoom' layout (the Korean solo-queue Short look):
   - `full_video_height(dims)` — Height (px) of the source frame when scaled to the full 1080 width.
   - `caption_anchor(layout, dims)` — Where captions belong for each layout, as (ASS alignment, margin px).
-  - `build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin, sendcmd, crop_w, suffix)` — Build the 9:16 reframing filter chain for one segment.
+  - `build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin, sendcmd, crop_w, suffix, endcard, endcard_from)` — Build the 9:16 reframing filter chain for one segment.
   - `make_dynamic_captions(clip, an, margin_v, fontsize)` — Transcribe spoken words and write an .ass with word-by-word reveal where the
   - `detect_facecam(video, start, dur, src_w, src_h)` — Best-effort: find a streamer facecam box via face detection on sampled frames.
   - `has_existing_captions(video, start, dur, dims)` — True if the source already has captions, so we don't add a duplicate layer:
@@ -18,7 +18,7 @@ _Generated 2026-07-29 by scripts/build_memory.py — do not edit by hand._
   - `make_thumbnail(video, start, dur, peak_pos, idx, clip_out, title, transcript)` — AI thumbnail for a freshly cut clip, taken from the CLEAN source video
   - `make_hero_thumbnail(video, moments, dims, title, transcript, out_path)` — ONE hero thumbnail for the whole source, composed like a per-clip thumb.
   - `rethumb_all()` — Regenerate thumbnails for every rendered clip in clips/ — no re-render,
-  - `cut_clip(video, start, dur, idx, layout, caption, subs, dims, cap_size, peak_pos, facecam_override, title, platform, ai_meta, thumbs, teaser)`
+  - `cut_clip(video, start, dur, idx, layout, caption, subs, dims, cap_size, peak_pos, facecam_override, title, platform, ai_meta, thumbs, teaser, endcard)`
   - `make_clips(video)` — Full local pipeline on a downloaded video. Shared by CLI + web.
   - `make_sample(video, at)` — Render a labeled framing comparison set to clips/samples/ so the user can
   - `show_channel()`
@@ -39,6 +39,13 @@ _Generated 2026-07-29 by scripts/build_memory.py — do not edit by hand._
   - _Caption placement. Run: .venv/bin/python tests/test_captions.py_
   - `test_crop_captions_bottom_lower_third()`
   - `test_zoom_captions_above_hud_not_top_bar()`
+
+## tests/test_endcard.py
+  - _End-to-end: the affiliate end card appears only over the final seconds._
+  - `test_endcard_only_covers_the_final_seconds()`
+  - `test_endcard_lands_at_the_end_of_the_finished_short()` — With a teaser prepended the card must still close the OUTPUT, not fire
+  - `test_endcard_is_absent_from_the_teaser_branch()` — The flash must never carry the CTA.
+  - `test_endcard_scrim_is_not_pure_black()`
 
 ## tests/test_hook.py
   - _HPC hook-overhaul unit tests. Run: .venv/bin/python tests/test_hook.py_

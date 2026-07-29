@@ -2,6 +2,35 @@
 _Last updated: 2026-07-24 (framing overhaul). Update me before every session end._
 
 ## Current state
+- **2026-07-29 (affiliate end card, branch `hpc-hook`):** Component 2 of
+  `docs/superpowers/specs/2026-07-28-affiliate-pro-setup-index-design.md`. Shorts
+  has **no clickable surface mid-playback**, so the only route to an affiliate
+  link is comment → owned page; the card exists to point at the pinned comment.
+  - `--endcard "TEXT"` burns a scrim band + centred text over the **final
+    `ENDCARD_DUR`=1.5s**. Drawn over frames the clip already had, so it costs
+    **zero runtime** — the deliberate alternative to the 5s spoken outro, which
+    would have spent 11–17% of a Short on a CTA fired when nothing is tappable.
+  - Appended **last** in `build_vf`, so it composites on top of any caption still
+    on screen. The four layouts anchor captions at four different heights; rather
+    than solve collision per layout, the CTA simply owns the lower band for the
+    closing beat.
+  - `endcard_from = dur - ENDCARD_DUR` is measured on the **main segment's** clock.
+    That is correct precisely because the teaser is *prepended*: the end of the
+    main segment is the end of the finished Short. The teaser's `build_vf` call
+    passes no endcard, so the flash can never carry the CTA.
+  - Scrim is `ENDCARD_BG` = `#252525`, never pure black (standing rule), at 0.82.
+  - **CLI only, deliberately** — not plumbed into `web/`. The web app is the
+    sellable product (`BUSINESS.md`); its users must not inherit the owner's
+    affiliate CTA.
+  - Tests: `tests/test_endcard.py` — differential on a pure-white source so the
+    scrim is unmistakable, incl. a control render that must stay white, and a
+    teaser+endcard case that fails if the card is timed against the file clock
+    instead of the segment clock. Full suite 7/7 green.
+- **2026-07-29 (memory):** repo onboarded to **graphify**; `graphify-out/GRAPH_REPORT.md`
+  is committed, the rest gitignored, refreshed by the 6h cron. It parses the web
+  templates and markdown that `build_memory.py` (Python-`ast` only) cannot see.
+  `PROJECT_MAP.md` had been permanently dirty — it was just uncommitted cron
+  output, now committed.
 - **2026-07-28 (HPC hook overhaul, branch `hpc-hook` off `framing-overhaul`):**
   clips opened on their least interesting second. Root cause: `find_hype_moments`
   sets `start = peak − clip_len × peak_pos`, so the first 5s were a pure

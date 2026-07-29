@@ -412,6 +412,17 @@ MAX_PAN_PX_PER_S  = None      # velocity cap; None -> src_w * 0.6
 CMD_FPS           = 15        # sendcmd densification rate (pan smoothness)
 CAP_SIZE_TRACKED  = 84        # caption size bump for crop/zoom layouts
 
+# ── affiliate end card (docs/superpowers/specs/2026-07-28-affiliate-*.md) ─────
+# Shorts has no clickable surface mid-playback, so the only route to an affiliate
+# link is comments -> owned page. The card exists to point at the pinned comment.
+# It is drawn OVER frames the clip already had, so it adds zero runtime — this is
+# the deliberate alternative to the 5s spoken outro, which would have cost 11-17%
+# of a Short's runtime on a CTA fired when nothing is tappable.
+ENDCARD_DUR  = 1.5        # seconds on screen, at the very end
+ENDCARD_SIZE = 58         # font size
+ENDCARD_BG   = "#252525"  # scrim colour — never pure black (standing rule)
+ENDCARD_BAND = 0.11       # band height as a fraction of the 1920px canvas
+
 
 def _even(v) -> int:
     return int(round(v / 2) * 2)  # yuv420p needs even dimensions
@@ -461,7 +472,7 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
 
 
 def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin,
-             sendcmd=None, crop_w=None, suffix="") -> str:
+             sendcmd=None, crop_w=None, suffix="", endcard=None, endcard_from=None) -> str:
     """Build the 9:16 reframing filter chain for one segment.
 
     `suffix` is appended to every internal link label AND to the `crop@dyn`
@@ -520,6 +531,19 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an,
         y = f"{cap_margin}" if cap_an in (7, 8, 9) else f"h-text_h-{cap_margin}"
         vf += (f",drawtext=fontfile='{FONT}':text='{_esc(caption)}':fontcolor=white:"
                f"fontsize={cap_size}:borderw=5:bordercolor=black@0.9:x=(w-text_w)/2:y={y}")
+    if endcard and endcard_from is not None:
+        # Affiliate CTA over the final ENDCARD_DUR seconds. Deliberately appended
+        # LAST, so it composites on top of any caption still on screen: the four
+        # layouts anchor captions at four different heights, and rather than solve
+        # collision per layout we let the CTA own the lower band for the closing
+        # beat. Every layer below it has already had its turn by then.
+        on = f"gte(t,{endcard_from:.2f})"
+        band = int(H * ENDCARD_BAND)
+        vf += (f",drawbox=x=0:y=ih-{band}:w=iw:h={band}:"
+               f"color={ENDCARD_BG}@0.82:t=fill:enable='{on}'")
+        vf += (f",drawtext=fontfile='{FONT}':text='{_esc(endcard)}':fontcolor=white:"
+               f"fontsize={ENDCARD_SIZE}:borderw=3:bordercolor=black@0.6:"
+               f"x=(w-text_w)/2:y=h-{band}+({band}-text_h)/2:enable='{on}'")
     return vf
 
 
@@ -1219,7 +1243,7 @@ def _teaser_window(start: float, dur: int, peak_pos: float) -> tuple[float, floa
 def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
              cap_size=66, peak_pos=0.72, facecam_override=None,
              title="Highlight", platform="youtube", ai_meta=True,
-             thumbs=False, teaser=True) -> Path:
+             thumbs=False, teaser=True, endcard=None) -> Path:
     out = CLIPS_DIR / f"short_{idx:02d}_{int(start)}s.mp4"
     src_w, src_h = dims
 
@@ -1252,8 +1276,13 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         tmp.unlink(missing_ok=True)
 
     cap_an, cap_margin = caption_anchor(layout, dims)
+    # The end card rides the MAIN segment, whose filters run on its own timeline —
+    # and since the teaser is prepended, the end of that segment IS the end of the
+    # finished Short. The teaser's build_vf call passes no endcard, so the flash
+    # can never carry the CTA.
     vf = build_vf(layout, dims, crop_x, facecam, ass_path, caption,
-                  cap_size_eff, cap_an, cap_margin, sendcmd=track_cmd)
+                  cap_size_eff, cap_an, cap_margin, sendcmd=track_cmd,
+                  endcard=endcard, endcard_from=max(0.0, dur - ENDCARD_DUR))
     # Applied once to the FINISHED stream, so a teaser and the main segment can
     # never end up graded or tagged differently.
     tail = ""
@@ -1321,7 +1350,7 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
 def make_clips(video: Path, *, max_clips=5, clip_len=30, peak_pos=0.72, layout="full",
                caption=None, subs=False, cap_size=66, title="Highlight",
                platform="youtube", progress=None, ai_meta=True, thumbs=True,
-               teaser=True) -> tuple[list[Path], Path | None]:
+               teaser=True, endcard=None) -> tuple[list[Path], Path | None]:
     """Full local pipeline on a downloaded video. Shared by CLI + web.
 
     Returns ``(clips, hero)`` — the rendered clips plus ONE hero thumbnail for the
@@ -1336,7 +1365,7 @@ def make_clips(video: Path, *, max_clips=5, clip_len=30, peak_pos=0.72, layout="
         clips.append(cut_clip(video, t, clip_len, i, layout, caption, subs, dims,
                               cap_size=cap_size, peak_pos=peak_pos,
                               title=title, platform=platform, ai_meta=ai_meta,
-                              thumbs=thumbs, teaser=teaser))   # per-clip 9:16 cover each
+                              thumbs=thumbs, teaser=teaser, endcard=endcard))
         if progress:
             progress(i, len(moments))
     hero = None
@@ -1450,6 +1479,11 @@ def main():
     p.add_argument("--clip-len", type=int, default=30, help="seconds per clip (30)")
     p.add_argument("--peak-pos", type=float, default=0.72,
                    help="spike position 0-1; higher = longer build-up (0.72)")
+    p.add_argument("--endcard", metavar="TEXT",
+                   help="affiliate CTA burned over the final 1.5s, e.g. "
+                        "\"Faker's settings -> pinned comment\". Adds no runtime; "
+                        "Shorts has no clickable surface mid-playback, so the card "
+                        "points at the pinned comment (see the affiliate spec)")
     p.add_argument("--no-teaser", action="store_true",
                    help="skip the cold-open flash of the moment before the spike "
                         "(on by default; it is what owns the first seconds)")
@@ -1500,7 +1534,7 @@ def main():
     clips, hero = make_clips(video, max_clips=a.max_clips, clip_len=a.clip_len,
                              peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
                              subs=a.subtitles, cap_size=a.cap_size,
-                             teaser=not a.no_teaser,
+                             teaser=not a.no_teaser, endcard=a.endcard,
                              title=a.title, platform=a.platform, ai_meta=not a.no_ai_meta,
                              thumbs=not a.no_thumbs)
 
