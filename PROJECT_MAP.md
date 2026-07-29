@@ -1,5 +1,5 @@
 # PROJECT_MAP — youtube-shorts-clipper
-_Generated 2026-07-24 by scripts/build_memory.py — do not edit by hand._
+_Generated 2026-07-29 by scripts/build_memory.py — do not edit by hand._
 
 ## clipper.py
   - _LoL YouTube Shorts Clipper — turn a YouTube VOD into 9:16 highlight clips._
@@ -10,7 +10,7 @@ _Generated 2026-07-24 by scripts/build_memory.py — do not edit by hand._
   - `zoom_geometry(dims)` — Band plan for the 'zoom' layout (the Korean solo-queue Short look):
   - `full_video_height(dims)` — Height (px) of the source frame when scaled to the full 1080 width.
   - `caption_anchor(layout, dims)` — Where captions belong for each layout, as (ASS alignment, margin px).
-  - `build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin, sendcmd, crop_w)`
+  - `build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin, sendcmd, crop_w, suffix)` — Build the 9:16 reframing filter chain for one segment.
   - `make_dynamic_captions(clip, an, margin_v, fontsize)` — Transcribe spoken words and write an .ass with word-by-word reveal where the
   - `detect_facecam(video, start, dur, src_w, src_h)` — Best-effort: find a streamer facecam box via face detection on sampled frames.
   - `has_existing_captions(video, start, dur, dims)` — True if the source already has captions, so we don't add a duplicate layer:
@@ -18,7 +18,7 @@ _Generated 2026-07-24 by scripts/build_memory.py — do not edit by hand._
   - `make_thumbnail(video, start, dur, peak_pos, idx, clip_out, title, transcript)` — AI thumbnail for a freshly cut clip, taken from the CLEAN source video
   - `make_hero_thumbnail(video, moments, dims, title, transcript, out_path)` — ONE hero thumbnail for the whole source, composed like a per-clip thumb.
   - `rethumb_all()` — Regenerate thumbnails for every rendered clip in clips/ — no re-render,
-  - `cut_clip(video, start, dur, idx, layout, caption, subs, dims, cap_size, peak_pos, facecam_override, title, platform, ai_meta, thumbs)`
+  - `cut_clip(video, start, dur, idx, layout, caption, subs, dims, cap_size, peak_pos, facecam_override, title, platform, ai_meta, thumbs, teaser)`
   - `make_clips(video)` — Full local pipeline on a downloaded video. Shared by CLI + web.
   - `make_sample(video, at)` — Render a labeled framing comparison set to clips/samples/ so the user can
   - `show_channel()`
@@ -40,9 +40,28 @@ _Generated 2026-07-24 by scripts/build_memory.py — do not edit by hand._
   - `test_crop_captions_bottom_lower_third()`
   - `test_zoom_captions_above_hud_not_top_bar()`
 
+## tests/test_hook.py
+  - _HPC hook-overhaul unit tests. Run: .venv/bin/python tests/test_hook.py_
+  - `test_build_vf_empty_suffix_is_byte_identical()`
+  - `test_build_vf_suffix_renames_every_internal_label()` — A suffixed graph must share NO link label with the unsuffixed one —
+  - `test_build_vf_suffix_renames_the_crop_instance()` — sendcmd addresses `crop@dyn` BY NAME, so the teaser's crop must not
+  - `test_refine_start_moves_to_the_liveliest_second()`
+  - `test_refine_start_is_a_noop_on_flat_audio()`
+  - `test_refine_start_keeps_the_spike_inside_its_band()` — The loud second before the fight must not be allowed to drag the start so
+  - `test_refine_start_never_runs_past_the_video()`
+  - `test_teaser_window_ends_just_after_the_spike()`
+  - `test_teaser_window_clamps_at_the_video_start()`
+  - `test_teaser_window_never_overruns_the_clip()`
+  - `test_teaser_is_short_enough_not_to_resolve()` — A guard on the tuning itself, not the code: a cold open that runs long
+
 ## tests/test_sample.py
   - _Sample harness renders a labeled comparison set._
   - `test_make_sample_writes_comparison_set()`
+
+## tests/test_teaser_render.py
+  - _End-to-end: the cold-open teaser really is prepended, and really is the climax._
+  - `test_teaser_prepends_the_climax()`
+  - `test_teaser_graph_is_valid_for_every_layout()` — The teaser doubles the reframing graph inside one -filter_complex. The
 
 ## tests/test_tracking.py
   - _Standalone tracking-logic tests. Run: .venv/bin/python tests/test_tracking.py_
