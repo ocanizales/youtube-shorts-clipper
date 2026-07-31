@@ -38,7 +38,7 @@ def _bright_frac(out: pathlib.Path) -> float:
 
 
 def _render(src, dims, x0, script, out):
-    vf = c.build_vf("crop", dims, x0, None, None, None, 66,
+    vf = c.build_vf("crop", dims, x0, None, None, 66,
                     *c.caption_anchor("crop", dims), sendcmd=script)
     subprocess.run([FF, "-y", "-loglevel", "error", "-i", str(src),
                     "-vf", vf, "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)],

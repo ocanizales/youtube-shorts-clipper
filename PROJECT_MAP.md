@@ -1,5 +1,5 @@
 # PROJECT_MAP — youtube-shorts-clipper
-_Generated 2026-07-29 by scripts/build_memory.py — do not edit by hand._
+_Generated 2026-07-31 by scripts/build_memory.py — do not edit by hand._
 
 ## clipper.py
   - _LoL YouTube Shorts Clipper — turn a YouTube VOD into 9:16 highlight clips._
@@ -10,20 +10,32 @@ _Generated 2026-07-29 by scripts/build_memory.py — do not edit by hand._
   - `zoom_geometry(dims)` — Band plan for the 'zoom' layout (the Korean solo-queue Short look):
   - `full_video_height(dims)` — Height (px) of the source frame when scaled to the full 1080 width.
   - `caption_anchor(layout, dims)` — Where captions belong for each layout, as (ASS alignment, margin px).
-  - `build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin, sendcmd, crop_w, suffix, endcard, endcard_from)` — Build the 9:16 reframing filter chain for one segment.
-  - `make_dynamic_captions(clip, an, margin_v, fontsize)` — Transcribe spoken words and write an .ass with word-by-word reveal where the
-  - `detect_facecam(video, start, dur, src_w, src_h)` — Best-effort: find a streamer facecam box via face detection on sampled frames.
+  - `build_vf(layout, dims, crop_x, ass_path, caption, cap_size, cap_an, cap_margin, sendcmd, crop_w, suffix, endcard, endcard_from)` — Build the 9:16 reframing filter chain for one segment.
+  - `detect_speech_language(clip)` — (language, probability) for a clip's speech, without transcribing it.
+  - `make_dynamic_captions(clip, an, margin_v, fontsize, translate)` — Transcribe spoken words and write an .ass with word-by-word reveal where the
   - `has_existing_captions(video, start, dur, dims)` — True if the source already has captions, so we don't add a duplicate layer:
-  - `write_metadata(clip, title_base, idx, platform, hook, meta)` — Write a sidecar .txt with a ready-to-paste title + caption for the
+  - `shorts_hashtags(transcript, platform)` — The 3-5 tag set, ordered #Shorts -> niche -> broad.
+  - `build_description(hook, body, tags, endcard, credit)` — Assemble a Shorts description to the front-loaded structure.
+  - `write_metadata(clip, title_base, idx, platform, hook, meta, transcript, endcard)` — Write a sidecar .txt with a ready-to-paste title + caption for the
   - `make_thumbnail(video, start, dur, peak_pos, idx, clip_out, title, transcript)` — AI thumbnail for a freshly cut clip, taken from the CLEAN source video
   - `make_hero_thumbnail(video, moments, dims, title, transcript, out_path)` — ONE hero thumbnail for the whole source, composed like a per-clip thumb.
   - `rethumb_all()` — Regenerate thumbnails for every rendered clip in clips/ — no re-render,
-  - `cut_clip(video, start, dur, idx, layout, caption, subs, dims, cap_size, peak_pos, facecam_override, title, platform, ai_meta, thumbs, teaser, endcard)`
+  - `cut_clip(video, start, dur, idx, layout, caption, subs, dims, cap_size, peak_pos, title, platform, ai_meta, thumbs, teaser, endcard, translate)`
   - `make_clips(video)` — Full local pipeline on a downloaded video. Shared by CLI + web.
   - `make_sample(video, at)` — Render a labeled framing comparison set to clips/samples/ so the user can
   - `show_channel()`
   - `upload_draft(clip, title, idx)`
   - `main()`
+
+## lol_kb.py
+  - _League of Legends domain knowledge base — game, pro scene, and T1._
+  - `whisper_prompt()` — Vocabulary hint fed to Whisper so esports proper nouns survive decoding.
+  - `has_context(text)` — True if the text is clearly League commentary.
+  - `correct_words(words)` — Repair mishears in a Whisper word list, preserving timing.
+  - `correct_text(text)` — Same repairs against free text (transcript, title hook, AI input).
+  - `detect_entities(text)` — What the commentary actually mentions: players, teams, leagues, moments.
+  - `niche_hashtags(text, limit)` — The 2-3 *specific* hashtags the Shorts SEO rules ask for.
+  - `context_brief(text, limit)` — Compact domain briefing injected into the Ollama metadata prompt.
 
 ## scripts/build_memory.py
   - _Generate PROJECT_MAP.md — a deterministic, no-LLM, no-network code map._
@@ -39,6 +51,22 @@ _Generated 2026-07-29 by scripts/build_memory.py — do not edit by hand._
   - _Caption placement. Run: .venv/bin/python tests/test_captions.py_
   - `test_crop_captions_bottom_lower_third()`
   - `test_zoom_captions_above_hud_not_top_bar()`
+
+## tests/test_description.py
+  - _Shorts description SEO + the two shipped framings._
+  - `test_first_line_fits_the_preview_window()` — Everything past ~125 chars sits behind '...more' and most viewers never
+  - `test_hashtags_survive_when_the_hook_is_too_long()` — The hook gets trimmed, never the tags — tags are what categorise the
+  - `test_primary_keyword_leads_the_first_line()`
+  - `test_shorts_tag_is_present_and_first()`
+  - `test_tag_count_stays_in_the_three_to_five_band()`
+  - `test_tags_are_specific_when_the_clip_names_someone()`
+  - `test_no_duplicate_tags()`
+  - `test_cta_lands_in_the_middle_band()` — Links/CTAs belong below the preview line and before ~500 chars.
+  - `test_description_respects_the_five_thousand_ceiling()`
+  - `test_body_keywords_are_kept_for_indexing()`
+  - `test_title_carries_no_hashtag(tmp)` — `#` in a title is parsed by YouTube as a hashtag: it burns title
+  - `test_only_full_and_zoom_are_selectable()`
+  - `test_both_shipped_layouts_still_build_a_filter_graph()`
 
 ## tests/test_endcard.py
   - _End-to-end: the affiliate end card appears only over the final seconds._
@@ -62,6 +90,19 @@ _Generated 2026-07-29 by scripts/build_memory.py — do not edit by hand._
   - `test_teaser_is_short_enough_not_to_resolve()` — A guard on the tuning itself, not the code: a cold open that runs long
   - `test_detail_scales_carry_explicit_scaler_flags()` — Regression guard for a silent quality bug.
   - `test_blurred_backdrops_do_not_pay_for_lanczos()` — The `full`/`fit` backdrops are boxblurred immediately after scaling, so a
+
+## tests/test_lol_kb.py
+  - _League knowledge base: whisper biasing, mishear repair, entity -> hashtags._
+  - `test_whisper_prompt_names_the_roster_and_stays_short()`
+  - `test_safe_repairs_need_no_context()`
+  - `test_multiword_repair_keeps_one_span_of_timing()` — 'fake her' 1.0->1.6 must become ONE token still covering 1.0->1.6 —
+  - `test_repair_carries_sentence_punctuation_across_a_merge()`
+  - `test_contextual_repair_fires_only_inside_a_league_clip()`
+  - `test_ambiguous_words_are_never_rewritten()` — 'Korea' is a word LCK casters genuinely use. A confident wrong caption is
+  - `test_detects_players_and_infers_their_team()`
+  - `test_niche_hashtags_prefer_the_specific()`
+  - `test_niche_hashtags_fall_back_when_nothing_is_named()`
+  - `test_context_brief_only_covers_what_the_clip_mentions()`
 
 ## tests/test_sample.py
   - _Sample harness renders a labeled comparison set._
@@ -88,6 +129,22 @@ _Generated 2026-07-29 by scripts/build_memory.py — do not edit by hand._
 ## tests/test_tracking_render.py
   - _End-to-end: sendcmd-driven crop follows a moving subject._
   - `test_tracked_crop_follows_moving_bar()`
+
+## tests/test_translate.py
+  - _Korean speech -> English captions, and the domain repair pass around it._
+  - **class _Word**
+  - **class _Seg**
+  - **class _Info**
+  - **class FakeWhisper** — Records every transcribe() call; returns `verbatim` first, then `english`
+    - transcribe(path, **kw)
+  - `test_korean_speech_is_captioned_in_english()`
+  - `test_english_speech_is_never_re_decoded()`
+  - `test_no_translate_flag_captions_verbatim()`
+  - `test_low_confidence_detection_does_not_trigger_translation()` — Below LANG_MIN_PROB the detector is guessing, and translating on a guess
+  - `test_translate_languages_is_just_korean_for_now()`
+  - `test_decoder_is_biased_toward_esports_vocabulary()`
+  - `test_mishears_are_repaired_before_they_reach_the_screen()`
+  - `test_captioned_korean_source_still_gets_our_english_layer()` — `has_existing_captions` exists to stop DUPLICATE layers. Korean burned-in
 
 ## web/app.py
   - _Web front-end for the LoL Shorts Clipper._

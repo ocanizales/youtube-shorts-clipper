@@ -30,22 +30,37 @@ Clips land in `clips/`. Then drag your favorites into YouTube Studio.
 | Flag | Default | What it does |
 |------|---------|--------------|
 | `--max-clips N` | 5 | how many clips to produce |
-| `--clip-len SEC` | 45 | length of each clip |
-| `--peak-pos FRAC` | 0.65 | spike position 0–1; higher = longer build-up |
-| `--layout fit\|crop` | fit | **fit** = whole frame + blurred bars (keeps minimap/facecam); **crop** = zoom that **tracks the on-screen action** |
+| `--clip-len SEC` | 30 | length of each clip |
+| `--peak-pos FRAC` | 0.72 | spike position 0–1; higher = longer build-up |
+| `--layout full\|zoom` | full | **full** = whole video centered with a blurred fill, captions under it; **zoom** = punched-in playfield that **tracks the action**, game HUD re-stacked at the bottom |
 | `--caption "TEXT"` | – | burns a headline onto every clip |
-| `--cap-size N` | 66 | caption font size |
-| `--cap-pos top\|middle\|bottom` | top | caption position |
+| `--cap-size N` | 66 | caption font size (tracked layouts bump it to 84) |
 | `--subtitles` | off | auto-caption spoken words (needs faster-whisper) |
+| `--no-translate` | off | caption foreign speech verbatim; by default **Korean speech is captioned in English** |
+| `--endcard "TEXT"` | – | affiliate CTA burned over the final 1.5s |
+| `--no-teaser` | off | skip the cold-open flash of the moment before the spike |
+| `--no-ai-meta` | off | skip Ollama title/description generation |
+| `--no-thumbs` | off | skip the hero thumbnail |
+| `--rethumb` | – | regenerate thumbnails for existing clips, then exit |
+| `--sample URL_OR_FILE` | – | render a framing/zoom comparison set, then exit |
 | `--draft` | off | ALSO upload clips as PRIVATE drafts to your channel |
 | `--list-channels` | – | show which channel `--draft` would use, then exit |
 
 **Examples:**
 ```
-python clipper.py "URL" --max-clips 8 --clip-len 50 --layout fit
+python clipper.py "URL" --max-clips 8 --clip-len 50 --layout zoom
 python clipper.py "URL" --caption "INSANE PENTAKILL" --peak-pos 0.7
-python clipper.py "URL" --subtitles
+python clipper.py "URL" --subtitles                 # LCK VOD -> English captions
+python clipper.py "URL" --subtitles --no-translate  # keep the original language
 ```
+
+**Captions on Korean sources.** With `--subtitles`, speech detected as Korean is
+decoded through Whisper's translate task, so the burned-in captions come out in
+English. Esports proper nouns are protected twice: the decoder is biased toward
+the real roster and vocabulary, and a repair pass fixes what still slips through
+(`lol_kb.py`, `docs/reference/lol-database.md`). A Korean broadcast that already
+carries burned-in Korean text still gets our English layer — the
+"already captioned, skip" rule is about duplicates, and a translation isn't one.
 
 ## Web app
 

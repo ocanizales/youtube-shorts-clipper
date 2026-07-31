@@ -17,6 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
+import lol_kb   # League domain knowledge: whisper biasing, mishear repair, tags
+
 DOWNLOADS_DIR = Path("downloads")
 CLIPS_DIR = Path("clips")
 W, H = 1080, 1920
@@ -419,7 +421,16 @@ def _esc(text: str) -> str:
     return text.replace("\\", "\\\\").replace(":", R"\:").replace("'", R"’")
 
 
-SPLIT_TOP_FRAC = 0.42  # facecam occupies the top portion of the 9:16 canvas
+# ── the two framings we ship ─────────────────────────────────────────────────
+# Cut to these two on 2026-07-31 at the user's request. "split" (facecam on top,
+# gameplay below) is gone entirely — it only ever worked on streamer VODs with a
+# webcam, and its face detection was the least reliable thing in the pipeline.
+# "crop" survives inside `build_vf` as the plain tracked-crop primitive that the
+# `--sample` harness renders with, but it is no longer a framing you can pick;
+# "fit" has always been internal-only in the same way. Do not re-add either to
+# LAYOUTS without being asked.
+LAYOUTS = ("full", "zoom")
+
 ZOOM_TOP_FRAC  = 0.105  # zoom: black caption bar height (fraction of the 9:16 canvas)
 ZOOM_HUD_FRAC  = 0.19   # zoom: bottom slice of the SOURCE treated as the game HUD strip
 
@@ -482,8 +493,6 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
     Alignment 8 = top-anchored (margin measured from the top),
     Alignment 2 = bottom-anchored (margin measured from the bottom).
     """
-    if layout == "split":      # only at the BOTTOM of the facecam (top) panel
-        return 8, int(H * SPLIT_TOP_FRAC * 0.88)
     if layout == "full":       # right UNDER the (now centered) video
         return 8, (H + full_video_height(dims)) // 2 + 24
     if layout == "fit":        # on the bottom blurred bar, clear of gameplay
@@ -494,7 +503,7 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
     return 2, int(H * 0.16)    # crop: lower third, above the source's bottom HUD
 
 
-def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an, cap_margin,
+def build_vf(layout, dims, crop_x, ass_path, caption, cap_size, cap_an, cap_margin,
              sendcmd=None, crop_w=None, suffix="", endcard=None, endcard_from=None) -> str:
     """Build the 9:16 reframing filter chain for one segment.
 
@@ -509,16 +518,7 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an,
     src_w, src_h = dims
     s = suffix
     dyn = f"crop@dyn{s}"
-    if layout == "split" and facecam:        # facecam on top, gameplay on bottom
-        fx, fy, fw, fh = facecam
-        top_h, bot_h = int(H * SPLIT_TOP_FRAC), H - int(H * SPLIT_TOP_FRAC)
-        vf = (f"split=2[a{s}][b{s}];"
-              f"[a{s}]crop={fw}:{fh}:{fx}:{fy},"
-              f"scale={W}:{top_h}:force_original_aspect_ratio=increase:flags={SCALE_FLAGS},crop={W}:{top_h}[cam{s}];"
-              f"[b{s}]scale={W}:{bot_h}:force_original_aspect_ratio=increase:flags={SCALE_FLAGS},"
-              f"crop={W}:{bot_h}[game{s}];"
-              f"[cam{s}][game{s}]vstack=inputs=2")
-    elif layout == "full":                   # WHOLE video centered, blurred fill above+below
+    if layout == "full":                     # WHOLE video centered, blurred fill above+below
         vf = (f"split=2[bg{s}][fg{s}];"
               f"[bg{s}]scale={W}:{H}:force_original_aspect_ratio=increase,"
               f"crop={W}:{H},boxblur=22:4[b{s}];"
@@ -556,8 +556,8 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an,
                f"fontsize={cap_size}:borderw=5:bordercolor=black@0.9:x=(w-text_w)/2:y={y}")
     if endcard and endcard_from is not None:
         # Affiliate CTA over the final ENDCARD_DUR seconds. Deliberately appended
-        # LAST, so it composites on top of any caption still on screen: the four
-        # layouts anchor captions at four different heights, and rather than solve
+        # LAST, so it composites on top of any caption still on screen: the
+        # layouts anchor captions at different heights, and rather than solve
         # collision per layout we let the CTA own the lower band for the closing
         # beat. Every layer below it has already had its turn by then.
         on = f"gte(t,{endcard_from:.2f})"
@@ -572,34 +572,105 @@ def build_vf(layout, dims, crop_x, facecam, ass_path, caption, cap_size, cap_an,
 
 _WHISPER = None
 
+# ── spoken-language handling ─────────────────────────────────────────────────
+# Source languages whose speech gets captioned as ENGLISH instead of verbatim.
+# Whisper's "translate" task decodes straight to English, so this costs one pass,
+# not a transcribe-then-translate round trip. Korean is here because the LCK is
+# the source of most of this footage; adding a language is a one-word edit.
+TRANSLATE_LANGS = {"ko"}
+LANG_MIN_PROB   = 0.60   # below this the detector is guessing — caption verbatim
+
+
+def _whisper_model():
+    """Cached faster-whisper model, or None if the package isn't installed.
+    CPU int8 avoids a CUDA/cuBLAS dependency; the model load is the expensive
+    part, so it is shared across every clip in a run."""
+    global _WHISPER
+    if _WHISPER is None:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            print("[subs] faster-whisper missing — run: pip install faster-whisper")
+            return None
+        _WHISPER = WhisperModel("base", device="cpu", compute_type="int8")
+    return _WHISPER
+
+
+def detect_speech_language(clip: Path) -> tuple[str | None, float]:
+    """(language, probability) for a clip's speech, without transcribing it.
+
+    `transcribe()` runs language detection eagerly and returns the segment
+    generator lazily, so reading `info` and dropping the generator costs the
+    detection pass alone — no decoding happens.
+    """
+    model = _whisper_model()
+    if model is None:
+        return None, 0.0
+    try:
+        _, info = model.transcribe(str(clip))
+        return (info.language or "").lower(), float(info.language_probability or 0.0)
+    except Exception as ex:
+        print(f"[subs] language detection failed ({ex.__class__.__name__})")
+        return None, 0.0
+
 
 def _ass_ts(s: float) -> str:
     h, m = divmod(int(s), 3600); m, sec = divmod(m, 60)
     return f"{h:d}:{m:02d}:{sec:02d}.{int((s % 1) * 100):02d}"
 
 
-def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int):
+def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int,
+                          translate: bool = True):
     """
     Transcribe spoken words and write an .ass with word-by-word reveal where the
     active word is highlighted (the modern animated-caption look). Returns
     (ass_path, hook, transcript) where hook is the first spoken phrase (used for
     the title) and transcript is the full spoken text (fed to AI metadata), or
     (None, None, None) if faster-whisper isn't installed / there's no speech.
-    """
-    global _WHISPER
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        print("[subs] faster-whisper missing — run: pip install faster-whisper")
-        return None, None, None
-    if _WHISPER is None:  # cached across clips; CPU int8 avoids a CUDA/cuBLAS dependency
-        _WHISPER = WhisperModel("base", device="cpu", compute_type="int8")
 
-    segments, _ = _WHISPER.transcribe(str(clip), word_timestamps=True)
+    Two domain passes wrap the decode:
+      * `lol_kb.whisper_prompt()` biases decoding toward esports proper nouns, so
+        Keria stops arriving as "Korea" in the first place;
+      * `lol_kb.correct_words()` repairs what still slips through, on the word
+        list rather than the joined text so every caption token keeps its timing.
+
+    If the speech is one of TRANSLATE_LANGS (Korean), the clip is decoded with
+    Whisper's translate task and the captions come out in English.
+    """
+    model = _whisper_model()
+    if model is None:
+        return None, None, None
+
+    bias = lol_kb.whisper_prompt()
+    # `info` is populated before the generator is consumed, so this first call
+    # has only run language detection at the point we read it.
+    segments, info = model.transcribe(str(clip), word_timestamps=True,
+                                      initial_prompt=bias)
+    lang = (info.language or "").lower()
+    prob = float(info.language_probability or 0.0)
+    if translate and lang in TRANSLATE_LANGS and prob >= LANG_MIN_PROB:
+        print(f"[subs] speech detected as '{lang}' ({prob:.0%}) — "
+              f"captioning the English translation")
+        segments, info = model.transcribe(str(clip), task="translate",
+                                          language=lang, word_timestamps=True,
+                                          initial_prompt=bias)
+    elif lang and lang != "en":
+        # Say which of the three reasons applied — "not translated" with no cause
+        # is the kind of log line that costs an hour later.
+        why = ("--no-translate" if not translate else
+               f"below the {LANG_MIN_PROB:.0%} confidence bar"
+               if lang in TRANSLATE_LANGS else "not in TRANSLATE_LANGS")
+        print(f"[subs] speech detected as '{lang}' ({prob:.0%}) — "
+              f"captioning verbatim ({why})")
+        if lang in ("ko", "ja", "zh", "ru", "ar", "th", "hi"):
+            print(f"[subs] warning: the caption style asks for Arial, which has "
+                  f"no '{lang}' glyphs — verbatim captions may render as boxes")
+
     words = [(w.word.strip(), w.start, w.end)
              for seg in segments for w in (seg.words or []) if w.word.strip()]
     if not words:
         return None, None, None
+    words = lol_kb.correct_words(words)
 
     # group into short phrases (max 5 words, split on >0.6s gaps)
     phrases, cur = [], []
@@ -648,48 +719,6 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int):
     hook = " ".join(w for w, _, _ in phrases[0][:8])   # first phrase -> title hook
     transcript = " ".join(w for w, _, _ in words)
     return ass, hook, transcript
-
-
-def detect_facecam(video: Path, start: float, dur: int, src_w: int, src_h: int):
-    """
-    Best-effort: find a streamer facecam box via face detection on sampled frames.
-    Returns (x, y, w, h) in source pixels, or None. Expands the detected face to a
-    webcam-sized box. Requires opencv (cv2).
-    """
-    try:
-        import cv2
-    except ImportError:
-        return None
-    cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    dw, dh = 640, 360
-    raw = subprocess.run(
-        [_FFMPEG, "-ss", str(start), "-i", str(video), "-t", str(dur),
-         "-vf", f"fps=1,scale={dw}:{dh}", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"],
-        capture_output=True).stdout
-    nf = len(raw) // (dw * dh * 3)
-    if nf == 0:
-        return None
-    frames = np.frombuffer(raw[:nf * dw * dh * 3], np.uint8).reshape(nf, dh, dw, 3)
-
-    boxes = []
-    for f in frames:
-        gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(gray, 1.1, 5, minSize=(40, 40))
-        if len(faces):
-            boxes.append(max(faces, key=lambda b: b[2] * b[3]))  # largest face
-    if len(boxes) < max(2, nf // 3):   # need consistent detections
-        return None
-
-    fx, fy, fw, fh = np.median(np.array(boxes), axis=0)
-    # expand face -> webcam box, scale back to source resolution
-    sx, sy = src_w / dw, src_h / dh
-    cx, cy = (fx + fw / 2) * sx, (fy + fh / 2) * sy
-    bw, bh = fw * sx * 2.4, fh * sy * 2.8
-    x, y = cx - bw / 2, cy - bh / 2
-    x = max(0, min(x, src_w - bw)); y = max(0, min(y, src_h - bh))
-    bw = min(bw, src_w - x); bh = min(bh, src_h - y)
-    return int(x), int(y), int(bw), int(bh)
 
 
 def has_existing_captions(video: Path, start: float, dur: int, dims) -> bool:
@@ -741,6 +770,78 @@ def _hashtags(platform: str) -> str:
     return {"youtube": yt, "tiktok": tk, "both": f"{yt}\n{tk}"}[platform]
 
 
+# ── Shorts description SEO (docs/reference/shorts-description-seo.md) ────────
+# YouTube truncates a Short's description at ~100-125 characters behind "...more",
+# and most viewers never expand it. Everything that has to be *seen* — the primary
+# keyword and the hashtags that categorise the video — must fit in that window;
+# everything that only has to be *indexed* can live below it, out to 5,000 chars.
+# Hashtags belong here rather than in the title, which needs its characters for a
+# clickable headline.
+SHORTS_PREVIEW_CHARS = 125   # hard budget for line 1 (keyword + hashtags)
+SHORTS_DESC_MAX      = 5000  # YouTube's description ceiling
+SHORTS_CTA_START     = 126   # links/CTAs belong in the 126-500 band
+SHORTS_TAGS_MIN      = 3     # 3-5 hashtags: #Shorts + 1 broad + 2-3 niche
+SHORTS_TAGS_MAX      = 5
+
+
+def shorts_hashtags(transcript: str | None, platform: str) -> list[str]:
+    """The 3-5 tag set, ordered #Shorts -> niche -> broad.
+
+    #Shorts first because it is what puts the video in the Shorts feed; the
+    niche tags come from what the caster actually said (`lol_kb.niche_hashtags`),
+    so a Faker clip gets #Faker #T1 rather than another generic #Gaming.
+    """
+    if platform == "tiktok":
+        return ["fyp", "LeagueOfLegends", "LoL", "Gaming"]
+    niche = lol_kb.niche_hashtags(transcript or "", limit=SHORTS_TAGS_MAX - 2)
+    tags = ["Shorts", *niche, "Gaming"]          # broad category tag goes last
+    out: list[str] = []
+    for t in tags:                               # dedupe, preserve order
+        if t.lower() not in {o.lower() for o in out}:
+            out.append(t)
+    return out[:SHORTS_TAGS_MAX]
+
+
+def _front_line(hook: str, tags: list[str]) -> str:
+    """Line 1: primary keyword + hashtags, guaranteed <= SHORTS_PREVIEW_CHARS.
+
+    The hook is trimmed at a word boundary rather than the tags being dropped —
+    the tags are what categorise the video, so they are the part that must
+    survive. Returns the tags alone if even one word will not fit beside them.
+    """
+    tagstr = " ".join(f"#{t}" for t in tags)
+    room = SHORTS_PREVIEW_CHARS - len(tagstr) - 1
+    hook = " ".join((hook or "").split()).rstrip(" .")
+    if room < 1:
+        return tagstr[:SHORTS_PREVIEW_CHARS]
+    if len(hook) > room:
+        hook = hook[:room].rsplit(" ", 1)[0].rstrip(" ,;:-—")
+    return f"{hook} {tagstr}".strip() if hook else tagstr
+
+
+def build_description(hook: str, body: str, tags: list[str],
+                      endcard: str | None = None, credit: str | None = None) -> str:
+    """Assemble a Shorts description to the front-loaded structure.
+
+        line 1 (<=125 chars) : primary keyword + 3-5 hashtags   <- the only part seen
+        band 126-500         : CTA / link
+        remainder            : SEO body, secondary keywords, credits
+
+    `body` is the AI's 1-2 sentence description; `endcard` is the affiliate CTA
+    already burned into the video, repeated here so the pinned-comment route has
+    a second surface.
+    """
+    parts = [_front_line(hook, tags)]
+    cta = endcard.strip() if endcard else "Full match link in the pinned comment."
+    parts.append(cta)
+    if body:
+        parts.append(" ".join(body.split()))
+    if credit:
+        parts.append(credit.strip())
+    parts.append("Clipped from the full VOD. All game footage belongs to Riot Games.")
+    return "\n\n".join(p for p in parts if p)[:SHORTS_DESC_MAX]
+
+
 # ── AI metadata from the clip transcript (idea from MoneyPrinter's gpt.py) ───
 # llama3.2:3b: small + non-thinking on purpose — runs in ~10s per clip on this
 # CPU box, where the 9b thinking models take minutes and stall the render loop.
@@ -748,23 +849,53 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
 
 
+# A JSON *schema*, not `"format": "json"`. On this CPU box a 3B model asked
+# politely for JSON returns prose and half-objects; constraining the decoder so
+# invalid tokens are never sampled took verdict parse rates from 0/4 to 4/4 in
+# the sibling apex-trader work. Same lesson, same fix.
+_META_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title":       {"type": "string"},
+        "hook":        {"type": "string"},
+        "description": {"type": "string"},
+        "hashtags":    {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["title", "hook", "description", "hashtags"],
+}
+
+
 def _ollama_metadata(transcript: str, idx: int) -> dict | None:
-    """Title/description/tags for one clip via the local Ollama instance.
+    """Title/hook/description/tags for one clip via the local Ollama instance.
     Strictly best-effort: any failure (Ollama down, bad JSON, empty title)
-    returns None and callers fall back to the hook-based title."""
+    returns None and callers fall back to the hook-based title.
+
+    The prompt carries two things the model cannot know on its own: a briefing
+    on whichever players/teams/events this clip actually mentions
+    (`lol_kb.context_brief`), and the Shorts description rules that decide what
+    has to fit in the first 125 characters."""
     import json
     import urllib.request
+    brief = lol_kb.context_brief(transcript)
     prompt = (
         "You write YouTube Shorts metadata for League of Legends esports "
         "highlight clips. Spoken commentary from this clip:\n"
         f'"{transcript[:1200]}"\n\n'
-        'Reply with JSON only, exactly: {"title": "...", "description": "...", '
-        '"hashtags": ["...", "..."]}\n'
-        "- title: catchy, under 70 characters, no emoji, faithful to the commentary\n"
-        "- description: 1-2 sentences\n"
-        "- hashtags: 4-6 single words, no # symbol")
+        + (f"Who and what this clip is about:\n{brief}\n\n" if brief else "")
+        + "Fields:\n"
+        "- title: catchy, under 70 characters, no emoji, NO hashtags, faithful "
+        "to the commentary. Lead with the player or team name if one is named.\n"
+        "- hook: one short phrase, under 60 characters, leading with the main "
+        "topic and why it is worth watching. This is the only text a viewer "
+        "sees before tapping 'more', so no throat-clearing.\n"
+        "- description: 2-3 sentences of context for search — who, what "
+        "happened, which team/event. Use the names from the briefing.\n"
+        "- hashtags: 4-6 single words, no # symbol, specific over generic\n\n"
+        "Only state what the commentary or the briefing actually says. Never "
+        "invent a year, a score, a tournament stage, or a result — a made-up "
+        "detail in a published description is worse than a vague one.")
     body = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False,
-            "format": "json", "options": {"temperature": 0.4, "num_predict": 250}}
+            "format": _META_SCHEMA, "options": {"temperature": 0.4, "num_predict": 320}}
     try:
         req = urllib.request.Request(
             f"{OLLAMA_HOST}/api/generate", data=json.dumps(body).encode(),
@@ -772,32 +903,46 @@ def _ollama_metadata(transcript: str, idx: int) -> dict | None:
         with urllib.request.urlopen(req, timeout=120) as r:
             meta = json.loads(json.load(r)["response"])
         title = str(meta.get("title", "")).strip().strip('"')
+        title = re.sub(r"#\w+", "", title).strip()   # hashtags belong in the description
+        hook = str(meta.get("hook", "")).strip().strip('"')
         desc = str(meta.get("description", "")).strip()
         tags = [re.sub(r"\W", "", str(t)) for t in meta.get("hashtags", [])]
         tags = [t for t in tags if t][:6]
         if not title:
             return None
         print(f"[meta {idx}] AI title: {title}")
-        return {"title": title[:90], "description": desc[:400], "tags": tags}
+        return {"title": title[:90], "hook": (hook or title)[:120],
+                "description": desc[:800], "tags": tags}
     except Exception as ex:
         print(f"[meta {idx}] Ollama unavailable ({ex.__class__.__name__}) — using hook title")
         return None
 
 
 def write_metadata(clip: Path, title_base: str, idx: int, platform: str,
-                   hook: str | None, meta: dict | None = None):
+                   hook: str | None, meta: dict | None = None,
+                   transcript: str | None = None, endcard: str | None = None):
     """Write a sidecar .txt with a ready-to-paste title + caption for the
     platform(s). TITLE stays the first section — the dashboard reads it.
-    With AI meta, add a TAGS section that --draft feeds to the YouTube API."""
+    With AI meta, add a TAGS section that --draft feeds to the YouTube API.
+
+    The clip index is bracketed `[3]`, never `(#3)`: YouTube parses a `#` in a
+    title as a hashtag, which both burns title characters and drops the clip
+    into a `#3` feed. Hashtags live in the description now — see
+    `build_description`."""
+    tags = shorts_hashtags(transcript, platform)
     if meta:
-        title = f"{meta['title']} (#{idx})"
-        body = (f"TITLE:\n{title}\n\nCAPTION:\n{meta['description']}\n"
-                f"{_hashtags(platform)}\n\nTAGS:\n{', '.join(meta['tags'])}\n")
+        title = f"{meta['title']} [{idx}]"
+        caption = build_description(meta.get("hook") or meta["title"],
+                                    meta["description"], tags, endcard=endcard)
+        body = (f"TITLE:\n{title}\n\nCAPTION:\n{caption}\n\n"
+                f"TAGS:\n{', '.join(meta['tags'])}\n")
     else:
         headline = (hook or title_base).strip().rstrip(".!?")
-        title = f"{headline} 🔥 (#{idx})"
-        body = (f"TITLE:\n{title}\n\nCAPTION:\n{headline} — League of Legends highlight.\n"
-                f"{_hashtags(platform)}\n")
+        title = f"{headline} 🔥 [{idx}]"
+        caption = build_description(headline,
+                                    f"{headline} — League of Legends highlight.",
+                                    tags, endcard=endcard)
+        body = f"TITLE:\n{title}\n\nCAPTION:\n{caption}\n"
     clip.with_suffix(".txt").write_text(body, encoding="utf-8")
 
 
@@ -1261,7 +1406,8 @@ def rethumb_all():
             print(f"[thumb] {mp4.name}: no frame — skipped")
             continue
         title = (_read_sidecar(mp4).get("TITLE") or mp4.stem).splitlines()[0]
-        title = re.sub(r"\s*\(#\d+\)\s*$", "", title).replace("🔥", "").strip()
+        # accepts both the current " [3]" suffix and the legacy " (#3)" one
+        title = re.sub(r"\s*(?:\(#\d+\)|\[\d+\])\s*$", "", title).replace("🔥", "").strip()
         _compose_thumb(_uncrop_916(img), _hook_text(title, None),
                        mp4.with_name(mp4.stem + "_thumb.jpg"))
 
@@ -1282,18 +1428,12 @@ def _teaser_window(start: float, dur: int, peak_pos: float) -> tuple[float, floa
 
 
 def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
-             cap_size=66, peak_pos=0.72, facecam_override=None,
+             cap_size=66, peak_pos=0.72,
              title="Highlight", platform="youtube", ai_meta=True,
-             thumbs=False, teaser=True, endcard=None) -> Path:
+             thumbs=False, teaser=True, endcard=None, translate=True) -> Path:
     out = CLIPS_DIR / f"short_{idx:02d}_{int(start)}s.mp4"
     src_w, src_h = dims
 
-    facecam = None
-    if layout == "split":
-        facecam = facecam_override or detect_facecam(video, start, dur, src_w, src_h)
-        if not facecam:                          # no face -> show the whole video instead
-            print(f"[clip {idx}] no facecam detected; falling back to full-video layout")
-            layout = "full"
     crop_x, track_cmd = 0, None
     if layout in ("crop", "zoom"):           # zoom tracks with its own (narrower) window
         zw = zoom_geometry(dims)[-1] if layout == "zoom" else None
@@ -1303,17 +1443,28 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
     # still clear the action — the user's clips read as "captions very far".
     cap_size_eff = max(cap_size, CAP_SIZE_TRACKED) if layout in ("crop", "zoom") else cap_size
 
-    # Don't add captions if the source is already captioned (avoids duplicates).
-    if subs and has_existing_captions(video, start, dur, dims):
-        print(f"[clip {idx}] source already has captions; skipping added captions")
-        subs = False
-
     ass_path, hook, transcript = None, None, None
     if subs:
         tmp = CLIPS_DIR / f".raw_{idx}.mp4"
         ff("-y", "-ss", str(start), "-i", str(video), "-t", str(dur), "-c", "copy", str(tmp))
-        an, margin = caption_anchor(layout, dims)     # placement is decided by layout
-        ass_path, hook, transcript = make_dynamic_captions(tmp, an, margin, max(48, cap_size_eff))
+        # "Already captioned -> don't add a second layer" is a rule about
+        # DUPLICATES. A Korean broadcast with burned-in Korean text is the one
+        # case where our layer says something the source's doesn't, so ask what
+        # language is being spoken before honouring the skip. Detection is one
+        # encoder pass; transcription is the expensive part and still gated.
+        skip = has_existing_captions(video, start, dur, dims)
+        if skip:
+            lang, prob = detect_speech_language(tmp)
+            if lang in TRANSLATE_LANGS and prob >= LANG_MIN_PROB:
+                print(f"[clip {idx}] source is captioned, but the speech is "
+                      f"'{lang}' — adding the English translation anyway")
+                skip = False
+            else:
+                print(f"[clip {idx}] source already has captions; skipping added captions")
+        if not skip:
+            an, margin = caption_anchor(layout, dims)  # placement is decided by layout
+            ass_path, hook, transcript = make_dynamic_captions(
+                tmp, an, margin, max(48, cap_size_eff), translate=translate)
         tmp.unlink(missing_ok=True)
 
     cap_an, cap_margin = caption_anchor(layout, dims)
@@ -1321,7 +1472,7 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
     # and since the teaser is prepended, the end of that segment IS the end of the
     # finished Short. The teaser's build_vf call passes no endcard, so the flash
     # can never carry the CTA.
-    vf = build_vf(layout, dims, crop_x, facecam, ass_path, caption,
+    vf = build_vf(layout, dims, crop_x, ass_path, caption,
                   cap_size_eff, cap_an, cap_margin, sendcmd=track_cmd,
                   endcard=endcard, endcard_from=max(0.0, dur - ENDCARD_DUR))
     # Applied once to the FINISHED stream, so a teaser and the main segment can
@@ -1360,7 +1511,7 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         # No captions and no headline on the flash; `suffix` keeps its link labels
         # and its crop@dyn instance from colliding with the main segment's (whose
         # crop@dyn is what the sendcmd script addresses by name).
-        tvf = build_vf(layout, dims, t_crop_x, facecam, None, None,
+        tvf = build_vf(layout, dims, t_crop_x, None, None,
                        cap_size_eff, cap_an, cap_margin, suffix="_t")
         fc = (f"[0:v]{tvf}[tv];[1:v]{vf}[mv];"
               f"[tv][mv]concat=n=2:v=1:a=0{tail}[vo];"
@@ -1380,7 +1531,8 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
     if track_cmd:                                # remove the temp sendcmd pan script
         track_cmd.unlink(missing_ok=True)
     meta = _ollama_metadata(transcript, idx) if (ai_meta and transcript) else None
-    write_metadata(out, title, idx, platform, hook, meta)   # title + caption sidecar
+    write_metadata(out, title, idx, platform, hook, meta,   # title + caption sidecar
+                   transcript=transcript, endcard=endcard)
     if thumbs:                                   # AI thumbnail from the clean source
         make_thumbnail(video, start, dur, peak_pos, idx, out,
                        (meta or {}).get("title") or (hook or title), transcript)
@@ -1391,7 +1543,7 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
 def make_clips(video: Path, *, max_clips=5, clip_len=30, peak_pos=0.72, layout="full",
                caption=None, subs=False, cap_size=66, title="Highlight",
                platform="youtube", progress=None, ai_meta=True, thumbs=True,
-               teaser=True, endcard=None) -> tuple[list[Path], Path | None]:
+               teaser=True, endcard=None, translate=True) -> tuple[list[Path], Path | None]:
     """Full local pipeline on a downloaded video. Shared by CLI + web.
 
     Returns ``(clips, hero)`` — the rendered clips plus ONE hero thumbnail for the
@@ -1406,7 +1558,8 @@ def make_clips(video: Path, *, max_clips=5, clip_len=30, peak_pos=0.72, layout="
         clips.append(cut_clip(video, t, clip_len, i, layout, caption, subs, dims,
                               cap_size=cap_size, peak_pos=peak_pos,
                               title=title, platform=platform, ai_meta=ai_meta,
-                              thumbs=thumbs, teaser=teaser, endcard=endcard))
+                              thumbs=thumbs, teaser=teaser, endcard=endcard,
+                              translate=translate))
         if progress:
             progress(i, len(moments))
     hero = None
@@ -1434,7 +1587,7 @@ def _render_sample(video: Path, start: float, dur: int, dims, crop_w: int,
     if not eased:
         script = None                        # static: freeze at the opening x
     an, margin = caption_anchor("crop", dims)
-    vf = build_vf("crop", dims, x0, None, None, None, 66, an, margin,
+    vf = build_vf("crop", dims, x0, None, None, 66, an, margin,
                   sendcmd=script, crop_w=crop_w)
     ff("-y", "-ss", str(start), "-i", str(video), "-t", str(dur),
        "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
@@ -1528,16 +1681,21 @@ def main():
     p.add_argument("--no-teaser", action="store_true",
                    help="skip the cold-open flash of the moment before the spike "
                         "(on by default; it is what owns the first seconds)")
-    p.add_argument("--layout", choices=["crop", "full", "split", "zoom"], default="full",
-                   help="full=whole video, captions under it (default); crop=motion-tracked "
-                        "zoom; split=facecam on top + gameplay on bottom (auto-detects facecam); "
-                        "zoom=punched-in playfield with the game HUD re-stacked at the bottom "
-                        "and a black caption bar on top")
+    p.add_argument("--layout", choices=LAYOUTS, default="full",
+                   help="full=whole video centered with a blurred fill, captions "
+                        "under it (default); zoom=punched-in playfield that tracks "
+                        "the action, with the game HUD re-stacked at the bottom and "
+                        "a black caption bar on top")
     p.add_argument("--caption", help="static headline text burned onto every clip")
     p.add_argument("--cap-size", type=int, default=66, help="caption font size (66)")
     p.add_argument("--subtitles", action="store_true",
                    help="dynamic word-by-word captions from speech (needs faster-whisper); "
-                        "auto-skipped if the source is already captioned")
+                        "auto-skipped if the source is already captioned, unless the "
+                        "speech is a language we translate")
+    p.add_argument("--no-translate", action="store_true",
+                   help=f"caption foreign speech verbatim instead of translating it. "
+                        f"By default speech detected as {'/'.join(sorted(TRANSLATE_LANGS))} "
+                        f"is captioned in English via Whisper's translate task")
     p.add_argument("--platform", choices=["youtube", "tiktok", "both"], default="youtube",
                    help="platform the generated title/caption sidecar targets (youtube)")
     p.add_argument("--title", default="LoL Highlight", help="base title for clips and --draft")
@@ -1576,6 +1734,7 @@ def main():
                              peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
                              subs=a.subtitles, cap_size=a.cap_size,
                              teaser=not a.no_teaser, endcard=a.endcard,
+                             translate=not a.no_translate,
                              title=a.title, platform=a.platform, ai_meta=not a.no_ai_meta,
                              thumbs=not a.no_thumbs)
 

@@ -1,7 +1,60 @@
 # HANDOFF — youtube-shorts-clipper
-_Last updated: 2026-07-24 (framing overhaul). Update me before every session end._
+_Last updated: 2026-07-31 (Korean captions + two framings + domain KB). Update me before every session end._
 
 ## Current state
+- **2026-07-31 (Korean captions, framing cut to two, League KB, Shorts description SEO):**
+  four user asks in one pass. All shipped; full suite green.
+
+  **Korean → English captions.** `make_dynamic_captions` reads `info.language`
+  from Whisper's *eager* language detection and re-decodes with
+  `task="translate"` when the speech is Korean. Costs no wasted work:
+  `transcribe()` returns the segment generator lazily, so dropping the first one
+  costs the detection pass alone; the second call passes `language=` to skip
+  re-detection. Gated on `TRANSLATE_LANGS={"ko"}` + `LANG_MIN_PROB=0.60` —
+  translating on a low-confidence guess would silently rewrite an English clip.
+  `--no-translate` opts out.
+  - **The trap:** `has_existing_captions` would have killed this feature for
+    exactly the footage it was built for, because a Korean broadcast usually
+    carries burned-in Korean text. That rule is about *duplicates* and a
+    translation is not one, so a captioned source is now asked what language it
+    speaks (`detect_speech_language`, one encoder pass) before the skip stands.
+    Generalises: **a guard written for one intent mis-fires when a new case
+    matches its shape but not its reason.**
+  - Verbatim non-Latin captions now warn that the ASS style asks for Arial,
+    which has no Hangul glyphs.
+
+  **Framing: `full` and `zoom` only** (`clipper.LAYOUTS`). `split` and
+  `detect_facecam` deleted outright; `build_vf` lost its dead `facecam`
+  parameter. `crop`/`fit` survive as internal-only branches — `crop` is what
+  `--sample` renders with — but neither is selectable. The web form validates
+  against `clipper.LAYOUTS` so a stale POST can't reach a retired path.
+  **Golden test updated deliberately:** `tests/test_hook.py` lost its "split"
+  entry and every `build_vf` call dropped an argument.
+
+  **`lol_kb.py` — League domain knowledge** (`docs/reference/lol-database.md`).
+  `whisper_prompt()` biases decoding toward the real roster; `correct_words()`
+  repairs the rest **on the timed word list**, because merging "fake her" →
+  "Faker" must keep one start and one end or the ASS builder loses its timing.
+  Repair table split SAFE / CONTEXTUAL: words a caster genuinely uses — "Korea"
+  (LCK broadcasts mean the country), "career", "gang", "coma", "pays" — are
+  **never** rewritten, only prevented at decode time. A confidently wrong
+  caption is worse than a mishear.
+
+  **Shorts description SEO** (`docs/reference/shorts-description-seo.md`).
+  `build_description` now writes to the 125-char preview budget: keyword +
+  3-5 hashtags on line 1, CTA below, SEO body and disclaimer after. Niche tags
+  derive from the transcript (`lol_kb.niche_hashtags`), so a Faker clip earns
+  `#Faker #T1`. Two fixes fell out: the clip index moved `(#3)` → `[3]` because
+  **YouTube parses `#` in a title as a hashtag**, and the metadata prompt now
+  forbids inventing years/scores/stages — llama3.2:3b had dated a test clip to
+  "the 2023 Worlds finals" off a transcript that said only "Worlds". Metadata
+  also moved from `format: "json"` to **JSON-schema constrained decoding**.
+
+  **Tests:** `tests/test_lol_kb.py` (10), `tests/test_description.py` (13),
+  `tests/test_translate.py` (8 — Whisper stubbed, so the translate-task contract
+  is asserted without needing audio). Verified live: both layouts render
+  end-to-end, and the Ollama path was run against the real llama3.2:3b.
+
 - **2026-07-29 (render speed — open defect #2, branch `hpc-hook`):** profiled before
   changing anything. One 30s `crop` clip with subs+thumbs on real 1080p gameplay:
   | stage | before | after |

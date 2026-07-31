@@ -17,6 +17,7 @@ from flask import (Flask, g, jsonify, make_response, render_template, request,
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+import clipper  # noqa: E402  — for LAYOUTS, the single source of truth
 import web.db as db  # noqa: E402
 
 UPLOADS, CLIPS = ROOT / "uploads", ROOT / "clips"
@@ -96,7 +97,10 @@ def process():
         "peak_pos": float(request.form.get("peak_pos", 0.72)),
         # HPC cold open — on unless the form explicitly turns it off.
         "teaser": request.form.get("teaser", "on") in ("on", "1", "true"),
-        "layout": request.form.get("layout", "full"),
+        # Only the two shipped framings; anything else (a stale form, a crafted
+        # POST) falls back to full rather than reaching a retired code path.
+        "layout": (request.form.get("layout", "full")
+                   if request.form.get("layout") in clipper.LAYOUTS else "full"),
         "caption": request.form.get("caption", "").strip(),
         "cap_size": int(request.form.get("cap_size", 66)),
         "subtitles": request.form.get("subtitles") in ("on", "1", "true"),

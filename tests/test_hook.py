@@ -10,17 +10,16 @@ import numpy as np
 import clipper as c
 
 DIMS = (1920, 1080)
-FACECAM = (100, 50, 300, 300)
 
 # Pinned output of build_vf. This is the regression guard for the framing/tracking
 # work: the production path renders with suffix="" and any drift must be deliberate.
 # Updated 2026-07-29 when scaler flags moved onto the scale filters (see
 # SCALE_FLAGS) -- the global -sws_flags form was a verified no-op.
+# Updated 2026-07-31: the "split" layout was removed with the facecam path, so
+# build_vf no longer takes a facecam argument. "full" and "zoom" are the two
+# framings a user can pick (c.LAYOUTS); "crop" and "fit" stay internal-only --
+# "crop" is what the --sample harness renders with.
 GOLDEN = {
-    "split": "split=2[a][b];[a]crop=300:300:100:50,scale=1080:806:"
-             "force_original_aspect_ratio=increase:flags=lanczos,crop=1080:806[cam];"
-             "[b]scale=1080:1114:force_original_aspect_ratio=increase:flags=lanczos,"
-             "crop=1080:1114[game];[cam][game]vstack=inputs=2",
     "full": "split=2[bg][fg];[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
             "crop=1080:1920,boxblur=22:4[b];[fg]scale=1080:-2:flags=lanczos[v];"
             "[b][v]overlay=(W-w)/2:(H-h)/2",
@@ -37,7 +36,7 @@ GOLDEN = {
 
 def test_build_vf_empty_suffix_is_byte_identical():
     for layout, want in GOLDEN.items():
-        got = c.build_vf(layout, DIMS, 77, FACECAM, None, None, 66, 2, 100)
+        got = c.build_vf(layout, DIMS, 77, None, None, 66, 2, 100)
         assert got == want, f"{layout} drifted:\n want {want}\n got  {got}"
 
 
@@ -47,9 +46,9 @@ def test_build_vf_suffix_renames_every_internal_label():
     import re
     for layout in GOLDEN:
         plain = set(re.findall(r"\[(\w+)\]", c.build_vf(
-            layout, DIMS, 77, FACECAM, None, None, 66, 2, 100)))
+            layout, DIMS, 77, None, None, 66, 2, 100)))
         sfx = set(re.findall(r"\[(\w+)\]", c.build_vf(
-            layout, DIMS, 77, FACECAM, None, None, 66, 2, 100, suffix="_t")))
+            layout, DIMS, 77, None, None, 66, 2, 100, suffix="_t")))
         assert not (plain & sfx), f"{layout} labels collide: {plain & sfx}"
         assert len(plain) == len(sfx), f"{layout} lost a label under suffixing"
 
@@ -58,7 +57,7 @@ def test_build_vf_suffix_renames_the_crop_instance():
     """sendcmd addresses `crop@dyn` BY NAME, so the teaser's crop must not
     answer to it — else the flash would pan on the main segment's timeline."""
     for layout in ("crop", "zoom"):
-        sfx = c.build_vf(layout, DIMS, 77, None, None, None, 66, 2, 100, suffix="_t")
+        sfx = c.build_vf(layout, DIMS, 77, None, None, 66, 2, 100, suffix="_t")
         assert "crop@dyn_t=" in sfx
         assert "crop@dyn=" not in sfx
 
@@ -139,8 +138,8 @@ def test_detail_scales_carry_explicit_scaler_flags():
     itself, or the pipeline quietly falls back to the default and the code comment
     claiming lanczos becomes fiction.
     """
-    for layout in ("split", "full", "fit", "zoom", "crop"):
-        vf = c.build_vf(layout, DIMS, 77, FACECAM, None, None, 66, 2, 100)
+    for layout in ("full", "fit", "zoom", "crop"):
+        vf = c.build_vf(layout, DIMS, 77, None, None, 66, 2, 100)
         assert f"flags={c.SCALE_FLAGS}" in vf, f"{layout} lost its explicit scaler"
 
 
@@ -148,7 +147,7 @@ def test_blurred_backdrops_do_not_pay_for_lanczos():
     """The `full`/`fit` backdrops are boxblurred immediately after scaling, so a
     high-quality scaler there is pure cost for zero visible benefit."""
     for layout in ("full", "fit"):
-        vf = c.build_vf(layout, DIMS, 77, None, None, None, 66, 2, 100)
+        vf = c.build_vf(layout, DIMS, 77, None, None, 66, 2, 100)
         bg = vf.split("boxblur")[0]
         assert f"flags={c.SCALE_FLAGS}" not in bg, \
             f"{layout} is paying for lanczos on a backdrop it is about to blur"

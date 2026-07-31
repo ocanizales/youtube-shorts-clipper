@@ -79,7 +79,7 @@ def test_endcard_lands_at_the_end_of_the_finished_short():
 
 def test_endcard_is_absent_from_the_teaser_branch():
     """The flash must never carry the CTA."""
-    tvf = c.build_vf("crop", (1920, 1080), 0, None, None, None, 66, 2, 100, suffix="_t")
+    tvf = c.build_vf("crop", (1920, 1080), 0, None, None, 66, 2, 100, suffix="_t")
     assert "drawbox" not in tvf and c.ENDCARD_BG not in tvf
 
 

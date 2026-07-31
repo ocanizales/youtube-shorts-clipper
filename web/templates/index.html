@@ -161,8 +161,7 @@
             <div><label for="layout">Layout</label>
               <select id="layout" name="layout">
                 <option value="full">Full video</option>
-                <option value="crop">Motion track</option>
-                <option value="split">Split screen (facecam)</option>
+                <option value="zoom">Zoom &mdash; stacked HUD</option>
               </select></div>
             <div><label for="peak_pos">Build-up: <span id="ppv">72</span>%</label>
               <input type="range" id="peak_pos" name="peak_pos" min="40" max="85" value="72"
@@ -187,10 +186,11 @@
               </select></div>
           </div>
           <label class="checkbox"><input type="checkbox" id="subtitles" name="subtitles">
-            Dynamic spoken-word captions (auto-transcribed)</label>
-          <!-- Caption position is set automatically by layout: split = bottom of the
-               facecam, full video = right under the video. Skipped if the source is
-               already captioned. -->
+            Dynamic spoken-word captions &mdash; Korean speech is translated to English</label>
+          <!-- Caption position is set automatically by layout: full video = right
+               under the video, zoom = just above the stacked HUD strip. Skipped if
+               the source is already captioned, UNLESS the speech is Korean, where
+               our English layer isn't a duplicate of the burned-in text. -->
         </fieldset>
 
         <button type="submit" id="go" class="generate">Generate clips</button>
