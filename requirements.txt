@@ -12,9 +12,18 @@ google-auth-oauthlib
 # ffmpeg is a system binary (winget install Gyan.FFmpeg), not a pip package.
 # Optional spoken-word subtitles: pip install faster-whisper
 #
-# Optional, and the ONLY dependency the `split` (facecam) framing has:
-#   pip install opencv-python-headless
+# The ONLY dependency the `split` (facecam) framing has. Installed 2026-08-01.
+opencv-python-headless<5     # 4.x ONLY — see below
 # Without it `detect_facecam` finds nothing and every split job falls back to
 # `full` — it says so on stdout rather than failing. opencv also powers the
 # burned-in-caption check in `has_existing_captions`, which likewise degrades to
 # "no captions detected" when it is absent.
+#
+# The `<5` is load-bearing, and the failure it prevents is worse than the one the
+# missing-opencv guard handles. opencv 5.x removed `cv2.CascadeClassifier` from
+# the top-level module AND ships no Haar cascades in `cv2.data` (the directory
+# exists but holds only `__init__.py`). So on 5.x the `import cv2` guard PASSES,
+# and the next line raises `AttributeError` — a hard crash mid-render, replacing
+# a documented graceful fallback with a stack trace. Verified on 5.0.0.93;
+# pinned back to 4.14.0.94, where the cascade file is present and the classifier
+# loads non-empty.

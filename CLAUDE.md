@@ -49,9 +49,13 @@ python clipper.py ...  # CLI path
   (it would replay footage the next part is about to show), no 9:16 thumbnail. A
   trailing remainder under `WHOLE_TAIL_MIN` (15s) is merged into the last part —
   never dropped. `--max-clips`/`--clip-len` don't apply and say so.
-- **`split` needs opencv.** It is the only thing that does. Without it
-  `detect_facecam` finds nothing, the clip falls back to `full`, and the only
-  hint is a printed line. `pip install opencv-python-headless`.
+- **`split` needs opencv, and it must be 4.x.** It is the only thing that does.
+  Without it `detect_facecam` finds nothing, the clip falls back to `full`, and
+  the only hint is a printed line. `pip install "opencv-python-headless<5"` —
+  **the pin is not cosmetic.** 5.x dropped top-level `cv2.CascadeClassifier` and
+  ships no Haar cascades, so the `import cv2` guard passes and the *next* line
+  raises `AttributeError`: a mid-render crash where the missing-opencv path
+  would have degraded quietly. Installed 2026-08-01 at 4.14.0.94.
 - **Korean speech is captioned in English** (Whisper's translate task), gated on
   `TRANSLATE_LANGS` + `LANG_MIN_PROB`. A source that already has burned-in
   captions still gets our layer when the speech is Korean — the "already
