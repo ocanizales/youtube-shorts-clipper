@@ -92,13 +92,17 @@ def process():
         return jsonify(error=msg + " Redeem a code or upgrade to continue."), 402
 
     opts = {
-        "max_clips": max(1, min(int(request.form.get("max_clips", 5)), 20)),
-        "clip_len": max(5, min(int(request.form.get("clip_len", 30)), 90)),
-        "peak_pos": float(request.form.get("peak_pos", 0.72)),
+        # `whole` disables these two in the form, so a whole-video POST arrives
+        # without them: read them defensively (an absent field is "" and int("")
+        # would raise) and let the layout decide whether they mean anything.
+        "max_clips": max(1, min(int(request.form.get("max_clips") or 5), 20)),
+        "clip_len": max(5, min(int(request.form.get("clip_len") or 30), 90)),
+        "peak_pos": float(request.form.get("peak_pos") or 0.72),
         # HPC cold open — on unless the form explicitly turns it off.
         "teaser": request.form.get("teaser", "on") in ("on", "1", "true"),
-        # Only the two shipped framings; anything else (a stale form, a crafted
-        # POST) falls back to full rather than reaching a retired code path.
+        # Only the shipped framings: clipper.LAYOUTS is the single source of
+        # truth, and anything else (a stale form, a crafted POST) falls back to
+        # full rather than reaching a retired code path or dying in argparse.
         "layout": (request.form.get("layout", "full")
                    if request.form.get("layout") in clipper.LAYOUTS else "full"),
         "caption": request.form.get("caption", "").strip(),

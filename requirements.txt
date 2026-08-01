@@ -11,3 +11,10 @@ google-auth-oauthlib
 
 # ffmpeg is a system binary (winget install Gyan.FFmpeg), not a pip package.
 # Optional spoken-word subtitles: pip install faster-whisper
+#
+# Optional, and the ONLY dependency the `split` (facecam) framing has:
+#   pip install opencv-python-headless
+# Without it `detect_facecam` finds nothing and every split job falls back to
+# `full` — it says so on stdout rather than failing. opencv also powers the
+# burned-in-caption check in `has_existing_captions`, which likewise degrades to
+# "no captions detected" when it is absent.

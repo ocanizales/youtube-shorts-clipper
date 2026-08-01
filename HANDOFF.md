@@ -1,7 +1,96 @@
 # HANDOFF — youtube-shorts-clipper
-_Last updated: 2026-07-31 (Korean captions + two framings + domain KB). Update me before every session end._
+_Last updated: 2026-08-01 (four framings: whole-video 16:9 + facecam restored). Update me before every session end._
 
 ## Current state
+- **2026-08-01 (the framing menu is now exactly four, and one of them is landscape):**
+
+  **`clipper.LAYOUTS = ("full", "whole", "split", "zoom")`** and it is now the
+  real single source of truth. It always claimed to be; it wasn't. The dashboard
+  at `/clipper` (`project-dashboard/app.py`) had gone on offering "Crop · track
+  action" and "Split · facecam" for a week after 2026-07-31 removed both from
+  `LAYOUTS`, so **every job submitted with either died in argparse** before a
+  frame was rendered. Fixed at the root: that page is stdlib-only and cannot
+  import `clipper`, so it now regex-reads the `LAYOUTS = (...)` literal out of
+  `clipper.py` (`clipper_layouts()`), and an unknown framing degrades to `full`
+  instead of killing the render. **Generalises: "single source of truth" is a
+  claim about a mechanism, not a comment — if nothing derives from it, it isn't
+  one.**
+
+  **`whole` — the entire video, in order, 16:9.** Not a highlight picker:
+  `whole_segments(duration)` returns consecutive `(start, length)` pairs that sum
+  back to the duration exactly (0:00–1:01, 1:01–2:02, …), and
+  `make_whole_parts` renders each one, titled `Part 1`…`Part N` via
+  `write_metadata(title_override=)`. Design calls worth keeping:
+  - **The tail is merged, never dropped.** A remainder under `WHOLE_TAIL_MIN`
+    (15s) extends the last part instead of shipping as its own; "all of the
+    video" is the whole feature, and a 3-second Part 8 is not a video. Worst case
+    is a 75s part, inside the 3-minute Shorts ceiling. A remainder ≥15s stands
+    alone. A source shorter than one part is one part.
+  - **No teaser.** A cold open would replay footage the next seconds are about to
+    show in order, which is the one thing a "Part N" series promises against.
+  - **No thumbnail.** `_compose_thumb` composes a 1080x1920 Shorts cover; a
+    vertical cover on a landscape part is worse than none.
+
+  **The canvas follows the layout.** `canvas(layout)` → (1920,1080) for `whole`,
+  (1080,1920) otherwise. Everything sized in canvas terms had to be re-derived,
+  and this is where the bugs would have been: the ASS `PlayResX/Y` (libass
+  *stretches the whole script* if it disagrees with the frame), `MarginV`, the
+  caption size (`CAP_SIZE_TRACKED * Hc/H` ≈ 47, same 4.4% of frame height as the
+  9:16 look), the end-card band **and** its font size. On `whole` the caption
+  sits *above* the CTA band rather than behind it — that band is a much larger
+  share of a 1080px-tall frame than of a 1920px-tall one.
+  **The vertical framings are byte-identical** (`tests/test_hook.py` GOLDEN
+  unchanged); only `whole` was added to it.
+
+  **`split` restored from `dd3430c^`, not pasted from it.** Recovered
+  `SPLIT_TOP_FRAC`, the caption anchor, the `build_vf` branch, `detect_facecam`
+  and the "no face → fall back to `full`" behaviour. Reconciled with everything
+  that changed since:
+  - `facecam` is **keyword-only** on `build_vf`, so every existing call site and
+    test keeps its positional signature (the old code had it positional at
+    index 4).
+  - The gameplay panel is now a **tracked** `crop@dyn` window
+    (`split_geometry()` sizes it to the panel's aspect so it neither stretches
+    nor letterboxes), driven by the same sendcmd script `crop`/`zoom` use.
+    Restoring the old static centre crop would have left one framing standing
+    still in a pipeline that pans.
+  - `build_vf("split", …)` with no facecam now returns the `full` graph instead
+    of falling through to the tracked-crop branch — the function is total.
+  - The teaser shares the main segment's facecam box (a different crop of the
+    webcam would read as a cut to a second person).
+  - **`split` needs opencv and this venv does not have it** (see below).
+
+  **UI/ops.** Selecting "Whole video" removes the "Clips" and "Secs each"
+  controls from the dashboard bar and drops both keys from the POST body; the
+  server reads them with defaults and `_run_clip_job` omits both CLI flags for
+  that layout. The clip grid switched to `object-fit:contain` so a 16:9 part is
+  letterboxed rather than cropped to a vertical box. The 60-minute watchdog was
+  replaced with **two ceilings**: a 20-minute *stall* cap (no output at all —
+  this is the one that catches hangs, and it does not care how big the job is)
+  plus an absolute cap of 60 min for highlight jobs and **12 h for whole-video
+  jobs**, because a 3-hour VOD is ~177 parts and the flat cap would have killed
+  every one of them mid-encode.
+
+  **Tests:** `tests/test_whole.py` (22 — segmentation arithmetic incl. the tail
+  cases and the coverage invariant, canvas selection, caption/CTA placement, ASS
+  PlayRes), `tests/test_split.py` (12 — geometry, the recovered filtergraph, the
+  fallback, plus an end-to-end render that checks the webcam colour is in the top
+  panel and absent from the bottom), `tests/test_whole_render.py` (1 end-to-end:
+  a source whose luma *encodes its own timestamp*, so part boundaries are
+  measurable — the parts must be consecutive with no gap and no repeat).
+  `tests/test_description.py`'s framing test and `tests/test_hook.py`'s GOLDEN
+  were updated deliberately.
+
+  **Known gaps (not regressions):**
+  - **opencv is not installed** in `.venv` and is not in `requirements.txt`'s
+    hard list, so `detect_facecam` returns None and **every `split` job renders
+    as `full`** on this box. It now prints `[split] opencv missing …` instead of
+    doing it silently. `pip install opencv-python-headless` to enable it.
+  - **Flask is not installed** in `.venv`, so `web/app.py` and `web/worker.py`
+    can't be imported here. Pre-existing.
+  - `--layout whole --subtitles` runs Whisper on every 61s part; on a long VOD
+    that is the dominant cost. Untested at that scale.
+
 - **2026-07-31 (Korean captions, framing cut to two, League KB, Shorts description SEO):**
   four user asks in one pass. All shipped; full suite green.
 

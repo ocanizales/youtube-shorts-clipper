@@ -102,10 +102,18 @@ def test_teaser_graph_is_valid_for_every_layout():
     c.CLIPS_DIR = d
     try:
         _, t_len = c._teaser_window(0.0, CLIP_DUR, PEAK_POS)
-        for i, layout in enumerate(("full", "zoom"), 1):
+        # Every framing in the menu, plus `whole` — which never gets a teaser from
+        # make_whole_parts, but a direct caller can still ask for one and the
+        # two-input graph has to compose. `split` is passed a facecam box so it
+        # exercises its own branch instead of falling back to `full`; that graph
+        # carries TWO crop@dyn instances (main + suffixed teaser), which is the
+        # collision the suffixing exists to prevent.
+        for i, layout in enumerate(c.LAYOUTS, 1):
             out = c.cut_clip(src, 0.0, CLIP_DUR, i, layout, None, False, (640, 360),
                              peak_pos=PEAK_POS, ai_meta=False, thumbs=False,
-                             teaser=True)
+                             teaser=True,
+                             facecam_override=(400, 20, 200, 150)
+                             if layout == "split" else None)
             assert out.exists() and out.stat().st_size > 10_000, f"{layout} render is empty"
             assert _duration(out) > CLIP_DUR + t_len * 0.5, \
                 f"{layout} did not get the teaser concatenated"

@@ -19,6 +19,11 @@ DIMS = (1920, 1080)
 # build_vf no longer takes a facecam argument. "full" and "zoom" are the two
 # framings a user can pick (c.LAYOUTS); "crop" and "fit" stay internal-only --
 # "crop" is what the --sample harness renders with.
+# Updated 2026-08-01: "whole" (16:9 parts) added, and "split" came back as a
+# KEYWORD-only facecam argument -- so every string below is unchanged, which is
+# the point: the canvas is now read per layout and the vertical framings had to
+# come out byte-identical. "split" is pinned in tests/test_split.py, where a
+# facecam box can be supplied.
 GOLDEN = {
     "full": "split=2[bg][fg];[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
             "crop=1080:1920,boxblur=22:4[b];[fg]scale=1080:-2:flags=lanczos[v];"
@@ -31,6 +36,8 @@ GOLDEN = {
             "[hs]crop=1920:206:0:874,scale=1080:116:flags=lanczos[hud];"
             "[game][hud]vstack=inputs=2,pad=1080:1920:0:202:black",
     "crop": "crop@dyn=w=607:h=1080:x=77:y=0,scale=1080:1920:flags=lanczos",
+    "whole": "scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos,"
+             "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:#252525,setsar=1",
 }
 
 
@@ -138,7 +145,7 @@ def test_detail_scales_carry_explicit_scaler_flags():
     itself, or the pipeline quietly falls back to the default and the code comment
     claiming lanczos becomes fiction.
     """
-    for layout in ("full", "fit", "zoom", "crop"):
+    for layout in ("full", "fit", "zoom", "crop", "whole"):
         vf = c.build_vf(layout, DIMS, 77, None, None, 66, 2, 100)
         assert f"flags={c.SCALE_FLAGS}" in vf, f"{layout} lost its explicit scaler"
 

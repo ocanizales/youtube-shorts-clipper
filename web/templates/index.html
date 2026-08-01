@@ -158,9 +158,13 @@
               <input type="number" id="max_clips" name="max_clips" value="5" min="1" max="20"></div>
             <div><label for="clip_len">Length (seconds)</label>
               <input type="number" id="clip_len" name="clip_len" value="30" min="10" max="90"></div>
+            <!-- The four framings in clipper.LAYOUTS, in that order. Anything not
+                 in that tuple is rejected server-side and falls back to "full". -->
             <div><label for="layout">Layout</label>
               <select id="layout" name="layout">
                 <option value="full">Full video</option>
+                <option value="whole">Whole video &mdash; 16:9 parts</option>
+                <option value="split">Split &mdash; facecam</option>
                 <option value="zoom">Zoom &mdash; stacked HUD</option>
               </select></div>
             <div><label for="peak_pos">Build-up: <span id="ppv">72</span>%</label>
@@ -246,6 +250,23 @@ $('file').addEventListener('change', e => setFile(e.target.files[0]));
 drop.addEventListener('drop', e => setFile(e.dataTransfer.files[0]));
 function setFile(f){ chosenFile=f; const n=$('fname'); n.hidden=!f; n.textContent=f?f.name:''; }
 $('peak_pos').addEventListener('input', e => $('ppv').textContent = e.target.value);
+
+// --- framing: "whole video" has no clip count and no clip length ---
+// It cuts the ENTIRE source into fixed 61s parts, so the count is whatever the
+// duration divides into and the length is not a choice. Disabling (rather than
+// hiding) keeps the layout from jumping; a disabled input is also omitted from
+// FormData, which is exactly what we want the server to see.
+function syncLayoutFields(){
+  const whole = $('layout').value === 'whole';
+  [['max_clips','Number of clips'], ['clip_len','Length (seconds)'],
+   ['peak_pos','Build-up'], ['teaser','Cold open']].forEach(([id]) => {
+    const el = $(id); if(!el) return;
+    el.disabled = whole;
+    const box = el.closest('div, label'); if(box) box.style.opacity = whole ? .45 : 1;
+  });
+}
+$('layout').addEventListener('change', syncLayoutFields);
+syncLayoutFields();
 
 // --- generate ---
 $('clip-form').addEventListener('submit', async e => {

@@ -112,11 +112,14 @@ def test_title_carries_no_hashtag(tmp=None):
     assert "#Shorts" in side["CAPTION"], "hashtags belong in the description"
 
 
-# ── framing: only the two the user kept ──────────────────────────────────────
-def test_only_full_and_zoom_are_selectable():
-    assert c.LAYOUTS == ("full", "zoom"), c.LAYOUTS
+# ── framing: exactly the four in the menu ────────────────────────────────────
+# Was "only full and zoom" until 2026-08-01, when `split` came back alongside the
+# new `whole` mode. `crop` and `fit` stay internal-only build_vf primitives and
+# must not be reachable from a --layout flag or a form POST.
+def test_the_menu_is_exactly_four_framings():
+    assert c.LAYOUTS == ("full", "whole", "split", "zoom"), c.LAYOUTS
     import argparse, contextlib, io
-    for bad in ("crop", "split"):
+    for bad in ("crop", "fit"):
         p = argparse.ArgumentParser()
         p.add_argument("--layout", choices=c.LAYOUTS, default="full")
         with contextlib.redirect_stderr(io.StringIO()):
@@ -124,12 +127,14 @@ def test_only_full_and_zoom_are_selectable():
                 p.parse_args(["--layout", bad])
             except SystemExit:
                 continue
-        raise AssertionError(f"{bad} is still selectable")
+        raise AssertionError(f"{bad} is selectable and should not be")
 
 
-def test_both_shipped_layouts_still_build_a_filter_graph():
+def test_every_shipped_layout_still_builds_a_filter_graph():
     for layout in c.LAYOUTS:
-        vf = c.build_vf(layout, (1920, 1080), 77, None, None, 66, 2, 100)
+        # split needs a facecam box or it deliberately renders as `full`.
+        fc = (1520, 40, 360, 270) if layout == "split" else None
+        vf = c.build_vf(layout, (1920, 1080), 77, None, None, 66, 2, 100, facecam=fc)
         assert vf and "scale=" in vf, layout
 
 

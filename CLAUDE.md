@@ -32,11 +32,26 @@ python clipper.py ...  # CLI path
 - `client_secret_*.json` (Google OAuth) is gitignored — keep it that way; the
   pre-push hook guards. Repo is private (`ocanizales/youtube-shorts-clipper`).
 - Captions must never cover faces or key gameplay; no captions during silence.
-- **Two framings only: `full` and `zoom` (stacked HUD)** — `clipper.LAYOUTS`.
-  The user cut `crop` and `split` on 2026-07-31; `split` and its facecam
-  detection are deleted outright, `crop`/`fit` survive as internal-only
-  `build_vf` branches (`crop` is what `--sample` renders). Don't re-add either
-  to `LAYOUTS`, or a layout dropdown, without being asked.
+- **Four framings, no more: `full`, `whole`, `split`, `zoom`** — `clipper.LAYOUTS`
+  is the single source of truth and everything else derives from it: `--layout`'s
+  argparse choices, `web/app.py`'s POST validation, `web/templates/index.html`'s
+  `<select>`, and the dashboard's `/clipper` page (stdlib-only, so it regex-reads
+  the tuple out of `clipper.py` in `clipper_layouts()`). Offering a framing
+  `LAYOUTS` doesn't contain is how every `crop`/`split` job died in argparse for
+  a week. `crop`/`fit` stay internal-only `build_vf` branches (`crop` is what
+  `--sample` renders); don't promote either without being asked.
+- **`whole` is landscape and everything else is not.** `canvas(layout)` decides —
+  16:9 1920x1080 for `whole`, 9:16 1080x1920 for the rest — and captions, the ASS
+  `PlayRes`, the caption size and the end-card band are all sized against it. A
+  9:16 number used on the `whole` canvas is a bug, not a rounding difference.
+- **`whole` cuts ALL of the video, in order.** Consecutive `WHOLE_PART_LEN` (61s)
+  parts titled `Part 1`..`Part N`, no highlight detection, no cold-open teaser
+  (it would replay footage the next part is about to show), no 9:16 thumbnail. A
+  trailing remainder under `WHOLE_TAIL_MIN` (15s) is merged into the last part —
+  never dropped. `--max-clips`/`--clip-len` don't apply and say so.
+- **`split` needs opencv.** It is the only thing that does. Without it
+  `detect_facecam` finds nothing, the clip falls back to `full`, and the only
+  hint is a printed line. `pip install opencv-python-headless`.
 - **Korean speech is captioned in English** (Whisper's translate task), gated on
   `TRANSLATE_LANGS` + `LANG_MIN_PROB`. A source that already has burned-in
   captions still gets our layer when the speech is Korean — the "already

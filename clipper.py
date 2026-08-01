@@ -1,6 +1,11 @@
 """
 LoL YouTube Shorts Clipper — turn a YouTube VOD into 9:16 highlight clips.
 
+Four framings (`LAYOUTS`): `full`, `split` and `zoom` are 9:16 Shorts cut from
+the audio-spike highlights; `--layout whole` is the exception in both respects —
+it renders 16:9 and cuts the ENTIRE video into consecutive 61s parts instead of
+selecting anything.
+
 Clips are saved locally by default; nothing is uploaded unless you pass --draft
 (which uploads as PRIVATE, never public). Run with -h for all options.
 """
@@ -295,6 +300,18 @@ def _dims(video: Path) -> tuple[int, int]:
     return int(nums[0]), int(nums[1])
 
 
+def _duration(video: Path) -> float:
+    """Length of a media file in seconds (0.0 if ffprobe can't say)."""
+    probe = _FFMPEG.replace("ffmpeg.exe", "ffprobe.exe") if _FFMPEG_DIR else "ffprobe"
+    out = subprocess.run([probe, "-v", "error", "-show_entries", "format=duration",
+                          "-of", "csv=p=0", str(video)],
+                         capture_output=True, text=True).stdout
+    try:
+        return float(out.strip())
+    except ValueError:
+        return 0.0
+
+
 def _column_motion(frames: np.ndarray) -> np.ndarray:
     """Per-column motion over time, with distractor regions masked out.
 
@@ -421,18 +438,83 @@ def _esc(text: str) -> str:
     return text.replace("\\", "\\\\").replace(":", R"\:").replace("'", R"’")
 
 
-# ── the two framings we ship ─────────────────────────────────────────────────
-# Cut to these two on 2026-07-31 at the user's request. "split" (facecam on top,
-# gameplay below) is gone entirely — it only ever worked on streamer VODs with a
-# webcam, and its face detection was the least reliable thing in the pipeline.
-# "crop" survives inside `build_vf` as the plain tracked-crop primitive that the
-# `--sample` harness renders with, but it is no longer a framing you can pick;
-# "fit" has always been internal-only in the same way. Do not re-add either to
-# LAYOUTS without being asked.
-LAYOUTS = ("full", "zoom")
+# ── the four framings we ship ────────────────────────────────────────────────
+# This tuple is the SINGLE SOURCE OF TRUTH for the framing menu. Everything that
+# offers a choice reads it or is checked against it: `--layout`'s argparse
+# choices, web/app.py's POST validation, the Flask template's <select>, and the
+# dashboard's /clipper page (which is stdlib-only and so parses this literal out
+# of the source rather than importing the module — see `clipper_layouts()`
+# there). Adding or removing a framing here is the one edit that matters; the
+# rest is labels.
+#
+#   full   9:16, whole source frame centered on a blurred fill of itself
+#   whole  16:9, the ENTIRE video re-cut into consecutive 61s "Part N" pieces
+#   split  9:16, streamer facecam on top / tracked gameplay below
+#   zoom   9:16, punched-in playfield with the game HUD re-stacked underneath
+#
+# "crop" and "fit" stay internal-only `build_vf` primitives — "crop" is the plain
+# tracked 9:16 window the `--sample` harness renders with, "fit" is the
+# letterbox-into-blur variant. Neither is a framing a user can pick.
+LAYOUTS = ("full", "whole", "split", "zoom")
 
+# Output canvas per framing. Everything is a 9:16 vertical Short except `whole`,
+# which exists precisely to keep the source's own landscape shape — so the canvas
+# has to follow the layout instead of being assumed vertical. `canvas()` is what
+# build_vf / caption_anchor / the ASS builder ask; the module-level W, H remain
+# the 9:16 default for everything that is only ever vertical (thumbnails).
+LAYOUT_CANVAS = {"whole": (1920, 1080)}
+
+
+def canvas(layout) -> tuple[int, int]:
+    """(width, height) of the output canvas for `layout`."""
+    return LAYOUT_CANVAS.get(layout, (W, H))
+
+
+SPLIT_TOP_FRAC = 0.42   # split: facecam occupies the top portion of the 9:16 canvas
 ZOOM_TOP_FRAC  = 0.105  # zoom: black caption bar height (fraction of the 9:16 canvas)
 ZOOM_HUD_FRAC  = 0.19   # zoom: bottom slice of the SOURCE treated as the game HUD strip
+
+# ── whole-video mode ─────────────────────────────────────────────────────────
+# `whole` is not a highlight picker: it cuts the ENTIRE source into consecutive
+# parts, chronologically, and every frame of the video ends up in exactly one of
+# them. 61s because that is the runtime a Short is cut for; the count is whatever
+# the duration divides into, which is why the UI hides "clips" and "secs each".
+WHOLE_PART_LEN = 61
+# A remainder shorter than this is folded into the last full part instead of
+# being emitted as its own. The requirement is that no footage is dropped, not
+# that every part is exactly 61s — and a 3-second "Part 8" is not a video, it is
+# an accident. Merging keeps every frame at the cost of one part running up to
+# 61+WHOLE_TAIL_MIN-1 = 75s, comfortably inside the 3-minute Shorts ceiling.
+WHOLE_TAIL_MIN = 15
+
+
+def whole_segments(duration: float, part_len: int = WHOLE_PART_LEN,
+                   tail_min: int = WHOLE_TAIL_MIN) -> list[tuple[float, float]]:
+    """Consecutive (start, length) parts covering the WHOLE video, in order.
+
+    Part 1 is 0:00-1:01, part 2 is 1:01-2:02, and so on: no gaps, no overlap, and
+    the segments always sum back to `duration` (that is the invariant — "all of
+    the video" is the feature). A trailing remainder shorter than `tail_min` is
+    merged into the last part rather than shipped as a runt of its own; a video
+    shorter than one part is a single part, because there is nothing to merge it
+    into and dropping it would drop the entire video.
+    """
+    if duration <= 0:
+        return []
+    n = int(duration // part_len)
+    rem = duration - n * part_len
+    segs = [(float(i * part_len), float(part_len)) for i in range(n)]
+    if not segs:                      # shorter than one part -> it IS the one part
+        return [(0.0, float(duration))]
+    if rem <= 1e-6:                   # exact multiple: nothing left over
+        return segs
+    if rem < tail_min:                # runt tail -> extend the last part over it
+        start, length = segs[-1]
+        segs[-1] = (start, length + rem)
+    else:
+        segs.append((float(n * part_len), rem))
+    return segs
+
 
 # ── framing / tracking tunables (docs/superpowers/specs/2026-07-23-...) ──────
 SW, SH            = 240, 135  # downscaled analysis grid (cols, rows)
@@ -481,6 +563,23 @@ def zoom_geometry(dims) -> tuple[int, int, int, int, int, int]:
     return hud_src_h, play_h, top_bar, hud_out_h, mid_h, crop_w
 
 
+def split_geometry(dims) -> tuple[int, int, int]:
+    """
+    Band plan for the 'split' layout: [facecam | tracked gameplay], stacked.
+    Returns (top_h, bot_h, crop_w) — the facecam band height, the gameplay band
+    height, and the SOURCE-pixel width of the gameplay window. `crop_w` is the
+    full-height window whose aspect matches the gameplay band, so scaling it to
+    the band neither stretches nor letterboxes; it is narrower than the source,
+    which is what leaves room for the same eased pan `crop`/`zoom` use.
+    """
+    src_w, src_h = dims
+    Wc, Hc = canvas("split")
+    top_h = _even(Hc * SPLIT_TOP_FRAC)
+    bot_h = Hc - top_h
+    crop_w = min(_even(src_h * Wc / bot_h), src_w)
+    return top_h, bot_h, crop_w
+
+
 def full_video_height(dims) -> int:
     """Height (px) of the source frame when scaled to the full 1080 width."""
     src_w, src_h = dims
@@ -492,9 +591,22 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
     Where captions belong for each layout, as (ASS alignment, margin px).
     Alignment 8 = top-anchored (margin measured from the top),
     Alignment 2 = bottom-anchored (margin measured from the bottom).
+
+    Margins are in CANVAS pixels, so they are measured against `canvas(layout)` —
+    a margin tuned as a fraction of a 1920px-tall Short would sit a long way off
+    the bottom of the 1080px-tall `whole` canvas.
     """
+    _, Hc = canvas(layout)
+    if layout == "split":      # only at the BOTTOM of the facecam (top) panel
+        return 8, int(Hc * SPLIT_TOP_FRAC * 0.88)
     if layout == "full":       # right UNDER the (now centered) video
         return 8, (H + full_video_height(dims)) // 2 + 24
+    if layout == "whole":
+        # Landscape lower third, lifted clear of the end-card band. The vertical
+        # layouts let the CTA cover whatever caption is under it for the closing
+        # beat; on a 1080-tall canvas that band is a much larger share of the
+        # frame, so here the caption sits above it instead of behind it.
+        return 2, int(Hc * (ENDCARD_BAND + 0.03))
     if layout == "fit":        # on the bottom blurred bar, clear of gameplay
         return 2, int(H * 0.07)
     if layout == "zoom":       # lower third: just above the bottom HUD strip
@@ -504,8 +616,16 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
 
 
 def build_vf(layout, dims, crop_x, ass_path, caption, cap_size, cap_an, cap_margin,
-             sendcmd=None, crop_w=None, suffix="", endcard=None, endcard_from=None) -> str:
-    """Build the 9:16 reframing filter chain for one segment.
+             sendcmd=None, crop_w=None, suffix="", endcard=None, endcard_from=None,
+             facecam=None) -> str:
+    """Build the reframing filter chain for one segment, onto `canvas(layout)`.
+
+    Every framing but `whole` targets the 1080x1920 vertical Short; `whole`
+    targets 1920x1080, so the canvas is read per layout rather than assumed.
+
+    `facecam` is (x, y, w, h) in SOURCE pixels and only means anything to the
+    `split` layout — it is keyword-only so the positional signature every other
+    call site (and every test) uses stays exactly as it was.
 
     `suffix` is appended to every internal link label AND to the `crop@dyn`
     filter *instance name*, so two copies of this graph can live in a single
@@ -516,9 +636,36 @@ def build_vf(layout, dims, crop_x, ass_path, caption, cap_size, cap_an, cap_marg
     the target `_write_sendcmd` addresses.
     """
     src_w, src_h = dims
+    Wc, Hc = canvas(layout)
     s = suffix
     dyn = f"crop@dyn{s}"
-    if layout == "full":                     # WHOLE video centered, blurred fill above+below
+    if layout == "split" and not facecam:
+        # No face was found (or the caller never looked). Falling through to the
+        # tracked-crop branch would silently ship a framing nobody asked for, so
+        # do here what cut_clip does out loud: show the whole video instead.
+        layout = "full"
+    if layout == "split":                    # facecam on top, tracked gameplay below
+        fx, fy, fw, fh = facecam
+        top_h, bot_h, gw = split_geometry(dims)
+        vf = (f"split=2[cam{s}][pf{s}];"
+              f"[cam{s}]crop={fw}:{fh}:{fx}:{fy},"
+              f"scale={Wc}:{top_h}:force_original_aspect_ratio=increase:flags={SCALE_FLAGS},"
+              f"crop={Wc}:{top_h}[face{s}];"
+              # The gameplay panel is a full-height window that PANS with the
+              # action, same primitive as crop/zoom — the 2026-07 pipeline drives
+              # crop@dyn's x from a sendcmd script, and the old static centre crop
+              # would have been the only framing left standing still.
+              f"[pf{s}]{dyn}=w={gw}:h={src_h}:x={crop_x}:y=0,"
+              f"scale={Wc}:{bot_h}:flags={SCALE_FLAGS}[game{s}];"
+              f"[face{s}][game{s}]vstack=inputs=2")
+    elif layout == "whole":                  # 16:9: the source frame, untouched
+        # No crop, no blur, no punch-in: this framing exists to ship the video as
+        # it was shot, just re-timed into parts. The scale+pad is a no-op on a
+        # 16:9 source and letterboxes anything else onto the 16:9 canvas rather
+        # than distorting it. The pad colour is the house grey, never pure black.
+        vf = (f"scale={Wc}:{Hc}:force_original_aspect_ratio=decrease:flags={SCALE_FLAGS},"
+              f"pad={Wc}:{Hc}:(ow-iw)/2:(oh-ih)/2:{ENDCARD_BG},setsar=1")
+    elif layout == "full":                   # WHOLE video centered, blurred fill above+below
         vf = (f"split=2[bg{s}][fg{s}];"
               f"[bg{s}]scale={W}:{H}:force_original_aspect_ratio=increase,"
               f"crop={W}:{H},boxblur=22:4[b{s}];"
@@ -536,7 +683,11 @@ def build_vf(layout, dims, crop_x, ass_path, caption, cap_size, cap_an, cap_marg
               f"[pf{s}]{dyn}=w={cw}:h={play_h}:x={crop_x}:y=0,scale={W}:{mid_h}:flags={SCALE_FLAGS}[game{s}];"
               f"[hs{s}]crop={src_w}:{hud_src_h}:0:{play_h},scale={W}:{hud_out_h}:flags={SCALE_FLAGS}[hud{s}];"
               f"[game{s}][hud{s}]vstack=inputs=2,pad={W}:{H}:0:{top_bar}:black")
-    else:                                    # motion-tracked 9:16 crop
+    else:                                    # motion-tracked 9:16 crop (internal-only)
+        # The four branches above this one are 9:16 by construction (their band
+        # plans come from zoom_geometry / full_video_height, which are written in
+        # 1080x1920 terms), so they keep using W/H directly. Only the shared tail
+        # below has to work on either canvas.
         if crop_w:                           # sample harness punch-in: a tighter 9:16 window
             cw = min(_even(crop_w), src_w)
             ch = min(_even(cw * H / W), src_h)   # keep 9:16 so scaling to WxH doesn't distort
@@ -561,11 +712,15 @@ def build_vf(layout, dims, crop_x, ass_path, caption, cap_size, cap_an, cap_marg
         # collision per layout we let the CTA own the lower band for the closing
         # beat. Every layer below it has already had its turn by then.
         on = f"gte(t,{endcard_from:.2f})"
-        band = int(H * ENDCARD_BAND)
+        # Band and type size are fractions of the CANVAS height, not of 1920: on
+        # the 16:9 `whole` canvas a band tuned for a 1920px-tall Short would eat
+        # a fifth of the frame and the text would be twice as large as intended.
+        band = int(Hc * ENDCARD_BAND)
+        ec_size = max(20, round(ENDCARD_SIZE * Hc / H))
         vf += (f",drawbox=x=0:y=ih-{band}:w=iw:h={band}:"
                f"color={ENDCARD_BG}@0.82:t=fill:enable='{on}'")
         vf += (f",drawtext=fontfile='{FONT}':text='{_esc(endcard)}':fontcolor=white:"
-               f"fontsize={ENDCARD_SIZE}:borderw=3:bordercolor=black@0.6:"
+               f"fontsize={ec_size}:borderw=3:bordercolor=black@0.6:"
                f"x=(w-text_w)/2:y=h-{band}+({band}-text_h)/2:enable='{on}'")
     return vf
 
@@ -620,7 +775,7 @@ def _ass_ts(s: float) -> str:
 
 
 def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int,
-                          translate: bool = True):
+                          translate: bool = True, play_res: tuple[int, int] | None = None):
     """
     Transcribe spoken words and write an .ass with word-by-word reveal where the
     active word is highlighted (the modern animated-caption look). Returns
@@ -636,7 +791,13 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int,
 
     If the speech is one of TRANSLATE_LANGS (Korean), the clip is decoded with
     Whisper's translate task and the captions come out in English.
+
+    `play_res` is the (width, height) the script's coordinates — MarginV and
+    every font size — are written in; it must match the canvas the clip will be
+    rendered onto, or libass stretches the whole script to fit. Defaults to the
+    9:16 Short canvas, which is every layout except `whole`.
     """
+    play_w, play_h = play_res or (W, H)
     model = _whisper_model()
     if model is None:
         return None, None, None
@@ -682,7 +843,7 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int,
         phrases.append(cur)
 
     ACCENT = "00D4FF"  # BGR: bright yellow highlight
-    head = (f"[Script Info]\nScriptType: v4.00+\nPlayResX: {W}\nPlayResY: {H}\n\n"
+    head = (f"[Script Info]\nScriptType: v4.00+\nPlayResX: {play_w}\nPlayResY: {play_h}\n\n"
             "[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,OutlineColour,"
             "BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,"
             "BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n"
@@ -719,6 +880,62 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int,
     hook = " ".join(w for w, _, _ in phrases[0][:8])   # first phrase -> title hook
     transcript = " ".join(w for w, _, _ in words)
     return ass, hook, transcript
+
+
+def detect_facecam(video: Path, start: float, dur: int, src_w: int, src_h: int):
+    """
+    Best-effort: find a streamer facecam box via face detection on sampled frames.
+    Returns (x, y, w, h) in source pixels, or None. Expands the detected face to a
+    webcam-sized box. Requires opencv (cv2).
+
+    Deliberately conservative — it demands a face in at least a third of the
+    sampled seconds and takes the MEDIAN box, because a single frame's false
+    positive would frame a third of the Short on a wall texture. When it returns
+    None the caller falls back to `full`; a wrong facecam is far worse than none.
+    """
+    try:
+        import cv2
+    except ImportError:
+        # Say it. Without this line the split layout silently renders as `full`
+        # and the only symptom is a framing the user did not choose.
+        print("[split] opencv missing — no face detection available "
+              "(pip install opencv-python-headless)")
+        return None
+    cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    dw, dh = 640, 360
+    raw = subprocess.run(
+        [_FFMPEG, "-ss", str(start), "-i", str(video), "-t", str(dur),
+         "-vf", f"fps=1,scale={dw}:{dh}", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"],
+        capture_output=True).stdout
+    nf = len(raw) // (dw * dh * 3)
+    if nf == 0:
+        return None
+    frames = np.frombuffer(raw[:nf * dw * dh * 3], np.uint8).reshape(nf, dh, dw, 3)
+
+    boxes = []
+    for f in frames:
+        gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, 1.1, 5, minSize=(40, 40))
+        if len(faces):
+            boxes.append(max(faces, key=lambda b: b[2] * b[3]))  # largest face
+    if len(boxes) < max(2, nf // 3):   # need consistent detections
+        return None
+
+    fx, fy, fw, fh = np.median(np.array(boxes), axis=0)
+    # expand face -> webcam box, scale back to source resolution
+    sx, sy = src_w / dw, src_h / dh
+    cx, cy = (fx + fw / 2) * sx, (fy + fh / 2) * sy
+    bw, bh = fw * sx * 2.4, fh * sy * 2.8
+    x, y = cx - bw / 2, cy - bh / 2
+    # Floor everything to an even number — yuv420p chroma wants even crop offsets
+    # and sizes, and flooring (rather than _even's round-to-nearest) can never
+    # push the box past the edge of the frame it was just clamped inside.
+    x = int(max(0, min(x, src_w - bw))) // 2 * 2
+    y = int(max(0, min(y, src_h - bh))) // 2 * 2
+    bw = int(min(bw, src_w - x)) // 2 * 2
+    bh = int(min(bh, src_h - y)) // 2 * 2
+    return x, y, bw, bh
 
 
 def has_existing_captions(video: Path, start: float, dur: int, dims) -> bool:
@@ -920,7 +1137,8 @@ def _ollama_metadata(transcript: str, idx: int) -> dict | None:
 
 def write_metadata(clip: Path, title_base: str, idx: int, platform: str,
                    hook: str | None, meta: dict | None = None,
-                   transcript: str | None = None, endcard: str | None = None):
+                   transcript: str | None = None, endcard: str | None = None,
+                   title_override: str | None = None):
     """Write a sidecar .txt with a ready-to-paste title + caption for the
     platform(s). TITLE stays the first section — the dashboard reads it.
     With AI meta, add a TAGS section that --draft feeds to the YouTube API.
@@ -928,13 +1146,19 @@ def write_metadata(clip: Path, title_base: str, idx: int, platform: str,
     The clip index is bracketed `[3]`, never `(#3)`: YouTube parses a `#` in a
     title as a hashtag, which both burns title characters and drops the clip
     into a `#3` feed. Hashtags live in the description now — see
-    `build_description`."""
+    `build_description`.
+
+    `title_override` replaces the headline outright and is what the whole-video
+    mode uses to title its parts "Part 1"…"Part N": a series is navigated by its
+    ordinal, and an AI-written headline per 61s slice would fight the ordering
+    the parts exist to express. The caption is still built normally, so a part
+    keeps its description, hashtags and CTA."""
     tags = shorts_hashtags(transcript, platform)
     if meta:
         title = f"{meta['title']} [{idx}]"
         caption = build_description(meta.get("hook") or meta["title"],
                                     meta["description"], tags, endcard=endcard)
-        body = (f"TITLE:\n{title}\n\nCAPTION:\n{caption}\n\n"
+        body = (f"TITLE:\n{title_override or title}\n\nCAPTION:\n{caption}\n\n"
                 f"TAGS:\n{', '.join(meta['tags'])}\n")
     else:
         headline = (hook or title_base).strip().rstrip(".!?")
@@ -942,7 +1166,7 @@ def write_metadata(clip: Path, title_base: str, idx: int, platform: str,
         caption = build_description(headline,
                                     f"{headline} — League of Legends highlight.",
                                     tags, endcard=endcard)
-        body = f"TITLE:\n{title}\n\nCAPTION:\n{caption}\n"
+        body = f"TITLE:\n{title_override or title}\n\nCAPTION:\n{caption}\n"
     clip.with_suffix(".txt").write_text(body, encoding="utf-8")
 
 
@@ -1368,10 +1592,12 @@ def make_hero_thumbnail(video: Path, moments, dims, title: str,
 
 
 def _uncrop_916(img):
-    """Recover a 16:9 action canvas from a rendered 9:16 clip frame.
+    """Recover a 16:9 action canvas from a rendered clip frame.
     zoom clips have a pure-black caption bar up top (and a sharp HUD band at
     the bottom) -> lift the playfield band; anything else is treated as the
-    'full' layout, whose middle band holds the whole source frame."""
+    'full' layout, whose middle band holds the whole source frame. A `whole`
+    part is already 16:9, and the 'full' branch reduces to the identity crop on
+    one (h == w*9/16), so it needs no case of its own."""
     from PIL import ImageStat
     w, h = img.size
 
@@ -1397,10 +1623,7 @@ def rethumb_all():
     if not clips:
         return print(f"[thumb] no clips in ./{CLIPS_DIR}/")
     for mp4 in clips:
-        probe = _FFMPEG.replace("ffmpeg.exe", "ffprobe.exe") if _FFMPEG_DIR else "ffprobe"
-        out = subprocess.run([probe, "-v", "error", "-show_entries", "format=duration",
-                              "-of", "csv=p=0", str(mp4)], capture_output=True, text=True).stdout
-        dur = float(out.strip() or 30)
+        dur = _duration(mp4) or 30
         img = _pick_frame(mp4, [dur * f for f in (0.15, 0.30, 0.45, 0.60, 0.75)])
         if img is None:
             print(f"[thumb] {mp4.name}: no frame — skipped")
@@ -1427,21 +1650,46 @@ def _teaser_window(start: float, dur: int, peak_pos: float) -> tuple[float, floa
     return t0, max(0.0, t1 - t0)
 
 
+def _track_window(layout, dims) -> int | None:
+    """SOURCE-pixel width of the window a tracked layout pans, or None for the
+    plain full-height 9:16 slice `crop` uses. Keeps the three call sites (main
+    segment, teaser, and the split gameplay panel) from drifting apart."""
+    if layout == "zoom":
+        return zoom_geometry(dims)[-1]
+    if layout == "split":
+        return split_geometry(dims)[-1]
+    return None
+
+
 def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
-             cap_size=66, peak_pos=0.72,
+             cap_size=66, peak_pos=0.72, facecam_override=None,
              title="Highlight", platform="youtube", ai_meta=True,
-             thumbs=False, teaser=True, endcard=None, translate=True) -> Path:
+             thumbs=False, teaser=True, endcard=None, translate=True,
+             title_override=None) -> Path:
     out = CLIPS_DIR / f"short_{idx:02d}_{int(start)}s.mp4"
     src_w, src_h = dims
 
+    facecam = None
+    if layout == "split":
+        facecam = facecam_override or detect_facecam(video, start, dur, src_w, src_h)
+        if not facecam:                          # no face -> show the whole video instead
+            print(f"[clip {idx}] no facecam detected; falling back to full-video layout")
+            layout = "full"
     crop_x, track_cmd = 0, None
-    if layout in ("crop", "zoom"):           # zoom tracks with its own (narrower) window
-        zw = zoom_geometry(dims)[-1] if layout == "zoom" else None
-        crop_x, track_cmd = track_path(video, start, dur, src_w, src_h, crop_w=zw)
+    if layout in ("crop", "zoom", "split"):  # each tracks with its own window width
+        crop_x, track_cmd = track_path(video, start, dur, src_w, src_h,
+                                       crop_w=_track_window(layout, dims))
 
     # Tracked layouts fill the whole 1080 width, so captions can be bigger and
     # still clear the action — the user's clips read as "captions very far".
+    # `split` is excluded: its captions sit inside the facecam panel, which is
+    # 42% of the canvas, so the bumped size would run straight over the face.
     cap_size_eff = max(cap_size, CAP_SIZE_TRACKED) if layout in ("crop", "zoom") else cap_size
+    if layout == "whole":
+        # The 16:9 canvas is 1080 tall, not 1920: a size tuned as ~4.4% of a
+        # Short's height has to be re-expressed against this canvas or the text
+        # comes out nearly twice as large relative to the frame.
+        cap_size_eff = max(28, round(CAP_SIZE_TRACKED * canvas(layout)[1] / H))
 
     ass_path, hook, transcript = None, None, None
     if subs:
@@ -1463,8 +1711,12 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
                 print(f"[clip {idx}] source already has captions; skipping added captions")
         if not skip:
             an, margin = caption_anchor(layout, dims)  # placement is decided by layout
+            # The 48px floor is a 9:16 number; on the shorter 16:9 canvas it would
+            # be the size the layout was just scaled DOWN from, so scale it too.
+            floor = round(48 * canvas(layout)[1] / H)
             ass_path, hook, transcript = make_dynamic_captions(
-                tmp, an, margin, max(48, cap_size_eff), translate=translate)
+                tmp, an, margin, max(floor, cap_size_eff), translate=translate,
+                play_res=canvas(layout))
         tmp.unlink(missing_ok=True)
 
     cap_an, cap_margin = caption_anchor(layout, dims)
@@ -1474,7 +1726,8 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
     # can never carry the CTA.
     vf = build_vf(layout, dims, crop_x, ass_path, caption,
                   cap_size_eff, cap_an, cap_margin, sendcmd=track_cmd,
-                  endcard=endcard, endcard_from=max(0.0, dur - ENDCARD_DUR))
+                  endcard=endcard, endcard_from=max(0.0, dur - ENDCARD_DUR),
+                  facecam=facecam)
     # Applied once to the FINISHED stream, so a teaser and the main segment can
     # never end up graded or tagged differently.
     tail = ""
@@ -1504,15 +1757,17 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         # loudnorm pass covers both segments (see _LOUDNORM) and there is no
         # concat-seam drift from audio priming samples.
         t_crop_x = crop_x
-        if layout in ("crop", "zoom"):        # frame the teaser on the FIGHT, not the walk-in
-            zw = zoom_geometry(dims)[-1] if layout == "zoom" else None
-            t_crop_x = track_path(video, t0, max(1, int(round(t_len))),
-                                  src_w, src_h, crop_w=zw)[0]
+        if layout in ("crop", "zoom", "split"):  # frame the teaser on the FIGHT, not the walk-in
+            t_crop_x = track_path(video, t0, max(1, int(round(t_len))), src_w, src_h,
+                                  crop_w=_track_window(layout, dims))[0]
         # No captions and no headline on the flash; `suffix` keeps its link labels
         # and its crop@dyn instance from colliding with the main segment's (whose
-        # crop@dyn is what the sendcmd script addresses by name).
+        # crop@dyn is what the sendcmd script addresses by name). The facecam box
+        # is the one thing it must share: a flash framed on a different crop of
+        # the webcam would read as a cut to a second person.
         tvf = build_vf(layout, dims, t_crop_x, None, None,
-                       cap_size_eff, cap_an, cap_margin, suffix="_t")
+                       cap_size_eff, cap_an, cap_margin, suffix="_t",
+                       facecam=facecam)
         fc = (f"[0:v]{tvf}[tv];[1:v]{vf}[mv];"
               f"[tv][mv]concat=n=2:v=1:a=0{tail}[vo];"
               f"[0:a][1:a]concat=n=2:v=0:a=1,{_LOUDNORM}[ao]")
@@ -1532,7 +1787,8 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         track_cmd.unlink(missing_ok=True)
     meta = _ollama_metadata(transcript, idx) if (ai_meta and transcript) else None
     write_metadata(out, title, idx, platform, hook, meta,   # title + caption sidecar
-                   transcript=transcript, endcard=endcard)
+                   transcript=transcript, endcard=endcard,
+                   title_override=title_override)
     if thumbs:                                   # AI thumbnail from the clean source
         make_thumbnail(video, start, dur, peak_pos, idx, out,
                        (meta or {}).get("title") or (hook or title), transcript)
@@ -1550,8 +1806,16 @@ def make_clips(video: Path, *, max_clips=5, clip_len=30, peak_pos=0.72, layout="
     whole source (or ``None`` if disabled/unavailable). Each clip also gets its own
     creative 9:16 thumbnail (``<stem>_thumb.jpg``) so every Short has a ready cover
     the dashboard can show + offer for download; ``thumbs`` gates both.
+
+    ``layout="whole"`` takes a different route entirely: see ``make_whole_parts``.
+    ``max_clips`` and ``clip_len`` do not apply there and are ignored.
     """
     dims = _dims(video)
+    if layout == "whole":
+        return make_whole_parts(video, dims, caption=caption, subs=subs,
+                                cap_size=cap_size, title=title, platform=platform,
+                                progress=progress, ai_meta=ai_meta, endcard=endcard,
+                                translate=translate)
     moments = find_hype_moments(video, clip_len, max_clips, peak_pos)
     clips = []
     for i, t in enumerate(moments, 1):
@@ -1568,6 +1832,48 @@ def make_clips(video: Path, *, max_clips=5, clip_len=30, peak_pos=0.72, layout="
                                    CLIPS_DIR / f"hero_{video.stem}.jpg",
                                    peak_pos=peak_pos, clip_len=clip_len)
     return clips, hero
+
+
+def make_whole_parts(video: Path, dims, *, caption=None, subs=False, cap_size=66,
+                     title="Highlight", platform="youtube", progress=None,
+                     ai_meta=True, endcard=None,
+                     translate=True) -> tuple[list[Path], Path | None]:
+    """Cut the ENTIRE video into consecutive 16:9 parts, titled Part 1..Part N.
+
+    This is not the highlight pipeline with different numbers — it shares nothing
+    with it but ``cut_clip``:
+
+      * no audio-spike detection, because nothing is being selected: the segments
+        are `whole_segments(duration)`, back to back, covering every frame;
+      * no cold-open teaser, because a flash-forward would replay footage the
+        part is about to show in order and break the one thing a "Part N" series
+        promises — that watching them in sequence is watching the video;
+      * no hero/per-part thumbnail, because ``_compose_thumb`` composes a 1080x1920
+        Shorts cover and these parts are landscape. A vertical cover on a 16:9
+        video is worse than none.
+
+    Returns ``(parts, None)`` to match ``make_clips``.
+    """
+    duration = _duration(video)
+    # Both tunables are passed explicitly rather than left to the defaults, so the
+    # values in force are the module's current ones — that is what lets a test
+    # shrink the part length and exercise the real segmentation on a 10s source.
+    segs = whole_segments(duration, WHOLE_PART_LEN, WHOLE_TAIL_MIN)
+    if not segs:
+        sys.exit("[error] could not read the video's duration — nothing to cut.")
+    print(f"[whole] {duration:.0f}s source -> {len(segs)} parts of "
+          f"<={WHOLE_PART_LEN}s (16:9)")
+    parts: list[Path] = []
+    for i, (start, seg_len) in enumerate(segs, 1):
+        print(f"[whole] Part {i}/{len(segs)}  {start:.0f}s -> {start + seg_len:.0f}s")
+        parts.append(cut_clip(video, start, seg_len, i, "whole", caption, subs, dims,
+                              cap_size=cap_size, title=title, platform=platform,
+                              ai_meta=ai_meta, thumbs=False, teaser=False,
+                              endcard=endcard, translate=translate,
+                              title_override=f"Part {i}"))
+        if progress:
+            progress(i, len(segs))
+    return parts, None
 
 
 # ── framing sample harness (pick a zoom level from real renders) ──────────────
@@ -1683,7 +1989,12 @@ def main():
                         "(on by default; it is what owns the first seconds)")
     p.add_argument("--layout", choices=LAYOUTS, default="full",
                    help="full=whole video centered with a blurred fill, captions "
-                        "under it (default); zoom=punched-in playfield that tracks "
+                        "under it (default); whole=cut the ENTIRE video into "
+                        f"consecutive {WHOLE_PART_LEN}s landscape 16:9 parts titled "
+                        "Part 1..Part N (--max-clips/--clip-len do not apply); "
+                        "split=streamer facecam on top, tracked gameplay below "
+                        "(falls back to full when no face is found); "
+                        "zoom=punched-in playfield that tracks "
                         "the action, with the game HUD re-stacked at the bottom and "
                         "a black caption bar on top")
     p.add_argument("--caption", help="static headline text burned onto every clip")
@@ -1728,7 +2039,21 @@ def main():
     if not a.url:
         p.error("a YouTube URL is required (unless using --list-channels or --rethumb)")
 
-    print(f"\n=== LoL Clipper ===\n{a.max_clips} x {a.clip_len}s | layout={a.layout}\n")
+    if a.layout == "whole":
+        # Length is fixed and the count comes from the source's duration, so both
+        # of these are meaningless here. Say so rather than appearing to honour a
+        # number the run will not use — the dashboard hides the fields entirely,
+        # but a CLI caller (or a script written before this mode existed) can
+        # still pass them.
+        given = [f"--{n.replace('_', '-')}" for n, d in
+                 (("max_clips", 5), ("clip_len", 30)) if getattr(a, n) != d]
+        if given:
+            print(f"[whole] ignoring {' and '.join(given)}: whole-video mode cuts "
+                  f"the entire source into {WHOLE_PART_LEN}s parts")
+        print(f"\n=== LoL Clipper ===\nwhole video -> {WHOLE_PART_LEN}s parts "
+              f"| layout=whole (16:9)\n")
+    else:
+        print(f"\n=== LoL Clipper ===\n{a.max_clips} x {a.clip_len}s | layout={a.layout}\n")
     video = download_video(a.url)
     clips, hero = make_clips(video, max_clips=a.max_clips, clip_len=a.clip_len,
                              peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
