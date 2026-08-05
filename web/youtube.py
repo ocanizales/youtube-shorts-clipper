@@ -110,6 +110,135 @@ def authorization_url() -> tuple[str, str]:
         access_type="offline", include_granted_scopes="true", prompt="consent")
 
 
+# ── device flow: connecting without a browser on this machine ────────────────
+# Google will not accept a redirect URI that is plain http or a raw IP, which is
+# what a VPS dashboard is, so the redirect flow above can only be completed over
+# localhost or https. The device flow sidesteps redirects entirely: we show a
+# short code, the user types it at google.com/device on any device they like,
+# and we poll. Nothing needs to be reachable from the internet.
+#
+# The cost is scope. youtube.upload is NOT among the scopes Google allows here
+# (only `youtube`, `youtube.readonly`, and a few non-YouTube ones), and
+# `youtube` is broader — it is full account management, not just upload.
+# videos.insert accepts it, so uploads work. The narrowing is done in code
+# instead: upload_draft is the only call this module ever makes against a
+# channel, and its privacyStatus is hardcoded.
+DEVICE_SCOPES = ["https://www.googleapis.com/auth/youtube"]
+DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
+DEVICE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+
+
+def _client_pair() -> tuple[str, str]:
+    """(client_id, client_secret) from whichever block the file carries.
+
+    A "TVs and Limited Input devices" client downloads under `installed`, the
+    same key a Desktop client uses. They are not interchangeable for the redirect
+    flow, but for the device flow only these two fields matter.
+    """
+    with open(CLIENT_SECRETS) as fh:
+        data = json.load(fh)
+    block = data.get("installed") or data.get("web") or {}
+    if not block.get("client_id"):
+        raise RuntimeError("client_secrets.json has no client_id")
+    return block["client_id"], block.get("client_secret", "")
+
+
+def _post_form(url: str, fields: dict) -> dict:
+    """POST application/x-www-form-urlencoded, return parsed JSON.
+
+    urllib rather than requests: this module is imported by the stdlib-only
+    dashboard's subprocess path, and an HTTP error here carries a JSON body we
+    need to read (`authorization_pending` arrives as a 428/400), so the error
+    case is parsed rather than raised.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    body = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(url, data=body,
+                                 headers={"Content-Type":
+                                          "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        try:
+            return json.loads(exc.read().decode())
+        except Exception:
+            raise RuntimeError(f"Google returned HTTP {exc.code}") from exc
+
+
+def device_start() -> dict:
+    """Ask Google for a user code. Returns the dict the UI needs to display."""
+    cid, _ = _client_pair()
+    out = _post_form(DEVICE_CODE_URL,
+                     {"client_id": cid, "scope": " ".join(DEVICE_SCOPES)})
+    if "device_code" not in out:
+        # The usual cause is a client that is not of type "TVs and Limited Input
+        # devices"; say so rather than surfacing a bare invalid_client. Google
+        # HTML-escapes the quotes in its own message, which reads badly in a
+        # terminal or a text node.
+        import html
+        raise RuntimeError(html.unescape(
+            out.get("error_description") or out.get("error")
+            or "Google did not return a device code. Is this a "
+               "'TVs and Limited Input devices' OAuth client?"))
+    return out
+
+
+def device_exchange(device_code: str) -> tuple[str, object]:
+    """Poll Google once. Returns (status, payload).
+
+    status is 'pending' | 'connected' | 'denied' | 'expired' | 'error'; payload
+    is a Credentials on 'connected' and a human-readable string otherwise. Split
+    out from device_poll so the CLI path can store a token.pickle and the web
+    path can store a DB row without either duplicating the protocol.
+
+    Polling is driven by the caller so a slow approval never holds a request
+    open. `authorization_pending` and `slow_down` are both normal and must not
+    be treated as failures.
+    """
+    cid, secret = _client_pair()
+    out = _post_form(DEVICE_TOKEN_URL, {
+        "client_id": cid, "client_secret": secret,
+        "device_code": device_code, "grant_type": DEVICE_GRANT,
+    })
+    err = out.get("error")
+    if err in ("authorization_pending", "slow_down"):
+        return "pending", err
+    if err == "access_denied":
+        return "denied", "You declined the request in Google."
+    if err == "expired_token":
+        return "expired", "That code expired. Start again."
+    if err:
+        return "error", (out.get("error_description") or err)
+
+    from google.oauth2.credentials import Credentials
+    creds = Credentials(
+        token=out["access_token"], refresh_token=out.get("refresh_token"),
+        token_uri=DEVICE_TOKEN_URL, client_id=cid, client_secret=secret,
+        scopes=DEVICE_SCOPES)
+    if not creds.refresh_token:
+        # Without it the connection dies at the first token expiry, an hour
+        # later, which is the worst time to discover it.
+        return "error", ("Google returned no refresh token; revoke this app at "
+                         "myaccount.google.com/permissions and connect again.")
+    return "connected", creds
+
+
+def device_poll(user_id: str, device_code: str) -> dict:
+    """device_exchange, stored as a web-app account row."""
+    status, payload = device_exchange(device_code)
+    if status != "connected":
+        return {"status": status, "detail": payload if isinstance(payload, str) else ""}
+    chan = _fetch_channel(payload)
+    db.save_youtube_account(user_id, chan["id"], chan["title"],
+                            _creds_to_json(payload))
+    return {"status": "connected", "channel_title": chan["title"],
+            "channel_id": chan["id"]}
+
+
 def _creds_to_json(creds) -> str:
     return json.dumps({
         "token": creds.token,
