@@ -2,6 +2,9 @@
 client_secrets.json
 client_secret_*.json
 token.pickle
+# Flask session signing key. Not a password, but anyone holding it can forge a
+# session cookie — which is enough to reach the YouTube upload routes.
+.flask_secret
 
 # Generated media & large files
 downloads/

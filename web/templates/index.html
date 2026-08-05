@@ -91,6 +91,22 @@
   .meta{width:100%;margin-top:8px;padding:8px;background:var(--surface-2);border:1px solid var(--line);
         border-radius:8px;color:var(--text);font-size:12px;font-family:inherit;resize:vertical}
   a{color:#5ab0ff}
+
+  /* YouTube connect strip + per-clip send button */
+  .ytbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:14px 0 0;
+         padding:12px 14px;background:var(--surface);border:1px solid var(--line);border-radius:10px}
+  .ytbar .who{font-size:14px;color:var(--text);flex:1;min-width:180px}
+  .ytbar .who b{color:#7CFFB2}
+  .ytbar small{display:block;color:var(--muted,#9a9a9a);font-size:12px;margin-top:2px}
+  .ytbtn{padding:8px 14px;border-radius:8px;border:1px solid var(--line);cursor:pointer;
+         background:#c4302b;color:#fff;font-size:14px;font-family:inherit}
+  .ytbtn.ghost{background:var(--surface-2);color:var(--text)}
+  .ytbtn[disabled]{opacity:.55;cursor:default}
+  .send{display:block;width:100%;margin-top:8px;padding:7px 10px;border-radius:8px;
+        border:1px solid var(--line);background:#c4302b;color:#fff;font-size:13px;
+        font-family:inherit;cursor:pointer}
+  .send[disabled]{opacity:.55;cursor:default}
+  .sent{display:block;text-align:center;margin-top:8px;font-size:13px;color:#7CFFB2}
 </style>
 </head>
 <body>
@@ -208,6 +224,15 @@
     <!-- Results -->
     <section aria-labelledby="res-h">
       <h2 id="res-h" class="sr-only">Generated clips</h2>
+
+      <!-- Connect once; then every finished clip gets a one-click Send button.
+           Uploads are always PRIVATE drafts — nothing is ever auto-published. -->
+      <div class="ytbar" id="ytbar" hidden>
+        <div class="who" id="yt-who" role="status" aria-live="polite"></div>
+        <button type="button" class="ytbtn" id="yt-connect" hidden>Connect YouTube</button>
+        <button type="button" class="ytbtn ghost" id="yt-disconnect" hidden>Disconnect</button>
+      </div>
+
       <div class="results" id="results" tabindex="-1"></div>
     </section>
   </main>
@@ -289,6 +314,91 @@ $('clip-form').addEventListener('submit', async e => {
   poll(j.job_id);
 });
 
+// ── YouTube: connect once, then send any clip as a private draft ────────────
+let ytReady = false;   // gates the per-clip Send buttons
+
+async function refreshYT(){
+  let s;
+  try { s = await (await fetch('/youtube/status')).json(); } catch(e){ return; }
+  const bar = $('ytbar'), who = $('yt-who');
+  const conn = $('yt-connect'), dis = $('yt-disconnect');
+  bar.hidden = false;
+  ytReady = !!s.connected;
+
+  if(!s.configured){
+    // No client_secrets.json yet. Say what to do rather than showing a button
+    // that can only fail.
+    who.innerHTML = 'YouTube posting not set up yet.' +
+      '<small>Add <code>client_secrets.json</code> to the project root — see SETUP.md. ' +
+      'Redirect URI: <code>' + s.redirect_uri + '</code></small>';
+    conn.hidden = true; dis.hidden = true;
+  } else if(s.connected){
+    who.innerHTML = 'Connected to <b>' + (s.channel_title || 'your channel') + '</b>' +
+      '<small>Clips upload as private drafts. Nothing is ever published automatically.</small>';
+    conn.hidden = true; dis.hidden = false;
+  } else {
+    who.innerHTML = 'Send finished clips straight to YouTube.' +
+      '<small>They arrive as private drafts you review in Studio before publishing.</small>';
+    conn.hidden = false; dis.hidden = true;
+  }
+  document.querySelectorAll('button.send').forEach(b => {
+    if(!b.dataset.busy && !b.dataset.done){
+      b.disabled = !ytReady;
+      b.textContent = ytReady ? 'Send to YouTube' : 'Connect YouTube first';
+    }
+  });
+}
+
+$('yt-connect').addEventListener('click', () => {
+  // A new tab keeps the results in this one. The callback page pings
+  // localStorage when it lands, and we poll as a fallback in case the tab is
+  // closed early or the storage event is blocked.
+  window.open('/youtube/connect', '_blank', 'noopener');
+  let n = 0;
+  const t = setInterval(() => { refreshYT(); if(++n > 60 || ytReady) clearInterval(t); }, 2000);
+});
+
+window.addEventListener('storage', e => { if(e.key === 'yt_ping') refreshYT(); });
+
+$('yt-disconnect').addEventListener('click', async () => {
+  if(!confirm('Disconnect this YouTube channel?')) return;
+  await fetch('/youtube/disconnect', {method:'POST'});
+  refreshYT();
+});
+
+function sendToYouTube(name, btn){
+  btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = 'Starting…';
+  api('/youtube/upload', {clip:name}).then(({ok, j}) => {
+    if(!ok){
+      delete btn.dataset.busy; btn.disabled = false;
+      btn.textContent = 'Send to YouTube';
+      alert(j.error || 'Upload could not start.');
+      return;
+    }
+    const t = setInterval(async () => {
+      const s = await (await fetch('/status/' + j.job_id)).json();
+      if(!s.done){ btn.textContent = s.stage || 'Uploading…'; return; }
+      clearInterval(t);
+      delete btn.dataset.busy;
+      if(s.error){
+        btn.disabled = false; btn.textContent = 'Retry upload';
+        alert(s.stage || 'Upload failed.');
+        return;
+      }
+      // Replace the button with the Studio link — the clip is now a draft and
+      // sending it twice would just make a duplicate.
+      btn.dataset.done = '1';
+      const a = document.createElement('a');
+      a.className = 'sent'; a.target = '_blank'; a.rel = 'noopener';
+      a.href = s.result_url || 'https://studio.youtube.com';
+      a.textContent = '✓ Draft on YouTube — open in Studio';
+      btn.replaceWith(a);
+    }, 1500);
+  });
+}
+
+refreshYT();
+
 function poll(id){
   const t = setInterval(async () => {
     const s = await (await fetch('/status/'+id)).json();
@@ -328,7 +438,14 @@ function poll(id){
         meta.setAttribute('aria-label', `Title and caption for clip ${i+1}`);
         fetch('/clips/'+name.replace(/\.mp4$/, '.txt'))
           .then(r => r.ok ? r.text() : '').then(txt => { meta.value = txt.trim(); });
-        d.append(v, a, meta); $('results').appendChild(d);
+        // One tap from finished clip to private draft, using the title and
+        // caption shown above it — no retyping, no second metadata pass.
+        const send = document.createElement('button');
+        send.type='button'; send.className='send';
+        send.disabled = !ytReady;
+        send.textContent = ytReady ? 'Send to YouTube' : 'Connect YouTube first';
+        send.addEventListener('click', () => sendToYouTube(name, send));
+        d.append(v, a, meta, send); $('results').appendChild(d);
       });
       $('stage').textContent = `Done. ${ (s.clips||[]).length } clips ready.`;
       $('results').focus();

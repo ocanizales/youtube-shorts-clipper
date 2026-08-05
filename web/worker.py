@@ -21,6 +21,31 @@ import web.db as db     # noqa: E402  (run from project root: python web/worker.
 POLL_SECONDS = 2
 
 
+def process_youtube(job: dict) -> None:
+    """Upload one finished clip to the owner's channel as a private draft.
+
+    Deliberately NOT part of `process()`: that function deletes `job["source"]`
+    in its `finally` block, because for a render the source is a transient
+    multi-GB download. For an upload job the source is the finished clip — the
+    product — and reusing that path would delete the very thing it just posted.
+    """
+    jid = job["id"]
+    try:
+        import web.youtube as yt
+        clip = Path(job["source"])
+        db.update_job(jid, stage="Uploading to YouTube", progress=1)
+        result = yt.upload_draft(
+            job["user_id"], clip,
+            on_progress=lambda pct: db.update_job(
+                jid, stage=f"Uploading to YouTube {pct}%", progress=max(1, pct)))
+        db.update_job(jid, status="done", stage="Draft ready on YouTube",
+                      progress=100, result_url=result["url"])
+        print(f"[worker] uploaded {clip.name} -> {result['url']}")
+    except Exception as e:
+        db.update_job(jid, status="error", error=1, stage=f"Error: {e}")
+        print(f"[worker] upload failed for {jid}: {e}")
+
+
 def process(job: dict) -> None:
     jid, opts = job["id"], job["opts"]
     video = None
@@ -71,8 +96,9 @@ def main() -> None:
     while True:
         job = db.claim_next_job()
         if job:
-            print(f"[worker] processing {job['id']}")
-            process(job)
+            kind = job.get("kind", "render")
+            print(f"[worker] processing {job['id']} ({kind})")
+            (process_youtube if kind == "youtube" else process)(job)
         else:
             time.sleep(POLL_SECONDS)
 

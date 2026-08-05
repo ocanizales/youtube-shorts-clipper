@@ -27,7 +27,23 @@ python clipper.py ...  # CLI path
 ## Hard rules
 - Downloads must be **1080p always** (user caught 480p once — never regress).
 - Uploads are staged as **hidden/draft** in YouTube Studio, never auto-published,
-  and only the one authorized channel.
+  and only the one authorized channel. **Two independent paths now:**
+  `clipper.py --draft` (CLI, `InstalledAppFlow` + `token.pickle`, needs a
+  *Desktop* OAuth client) and the web app's **Connect YouTube** button
+  (`web/youtube.py`, server-side `Flow` + creds in SQLite, needs a *Web
+  application* client + a registered redirect URI). Same filename, different
+  client types — see SETUP.md. Connecting one does not connect the other.
+- **`privacyStatus: private` is hardcoded and takes no argument.** Neither
+  `upload_draft` may grow a privacy parameter: making it callable would put
+  "publish publicly" one wrong argument away, and a test asserts the signature
+  stays closed. Nothing auto-publishes, ever.
+- **`web/youtube.py` credentials are live channel access.** `youtube_accounts.creds`
+  holds a refresh token — anyone who can read `data.db` can post to that channel.
+  `data.db`, `client_secrets.json` and `.flask_secret` are all gitignored; keep
+  it that way. (CLAUDE.md previously claimed a pre-push hook guards this — there
+  is no `.git/hooks/pre-push` on this box, so the ignore list is the only guard.)
+- The web app needs `flask` (`web/requirements.txt`); it was missing from `.venv`
+  until 2026-08-05. `.venv/bin/pip install -r web/requirements.txt`.
 - Delete the full downloaded VOD at session end — don't let `downloads/` accumulate.
 - `client_secret_*.json` (Google OAuth) is gitignored — keep it that way; the
   pre-push hook guards. Repo is private (`ocanizales/youtube-shorts-clipper`).

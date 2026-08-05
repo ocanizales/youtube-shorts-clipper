@@ -113,19 +113,80 @@ Accounts, plans, and codes:
 Production path: swap SQLite for Postgres and the poll-loop queue for Redis + RQ;
 run the web tier under gunicorn. The `db.py` function signatures are the seam.
 
-## Optional: upload as PRIVATE drafts
+## Upload as PRIVATE drafts
 
-Only if you want clips to land in YouTube Studio as private drafts to review/publish:
+Clips can go straight to YouTube Studio as private drafts you review before
+publishing. **Nothing is ever auto-published** — that is enforced in code, not a
+default you can flip.
+
+There are two ways in, and they need *different* OAuth client types. Pick one.
+
+### A. "Connect YouTube" button in the web app  ← the easy one
+
+One-time setup, ~5 minutes in the browser:
+
+1. **Google Cloud Console** → create or pick a project.
+2. **APIs & Services → Library** → enable **YouTube Data API v3**.
+3. **APIs & Services → OAuth consent screen** → External → fill in app name and
+   your email. While the app is in *Testing*, add your own Google account under
+   **Test users** — without that, sign-in fails with "app not verified".
+4. **Credentials → Create credentials → OAuth client ID → Web application.**
+   Under **Authorised redirect URIs** add exactly:
+
+   ```
+   http://localhost:5000/youtube/callback
+   ```
+
+   Exactly — scheme, host, port, path, no trailing slash. A mismatch here is the
+   `redirect_uri_mismatch` error, and it is the single most common way this
+   setup fails. Google exempts `localhost` from its HTTPS rule, so no
+   certificate is needed.
+5. **Download JSON** → save it as `client_secrets.json` in the project root.
+6. Restart the web app. Open it over an SSH tunnel so the browser really is at
+   `localhost:5000`:
+
+   ```bash
+   ssh -L 5000:localhost:5000 you@your-vps     # then browse to localhost:5000
+   ```
+
+7. Enter your email in the app (that creates the account), then click
+   **Connect YouTube**. Approve, and the strip shows which channel is connected.
+   Every finished clip now has a **Send to YouTube** button.
+
+Serving it somewhere other than localhost? Set the redirect URI to match and
+register that same URL in step 4. Any non-localhost host **must** be https:
+
+```bash
+export YT_REDIRECT_URI="https://clips.example.com/youtube/callback"
+```
+
+The title, caption and tags posted are exactly the ones in the sidecar `.txt`
+shown under each clip — no retyping, no second AI pass.
+
+### B. `clipper.py --draft` from the command line
+
+The original path, still supported:
+
 1. Google Cloud Console → enable **YouTube Data API v3** → create an **OAuth
    Desktop** client → download JSON → rename to `client_secrets.json` here.
 2. `python clipper.py --list-channels` — sign in and **pick the channel**; it
-   prints the channel name+ID so you can confirm. That's how access is limited
-   to just that one channel.
-3. `python clipper.py "URL" --draft` — uploads each clip as **private** (never
-   public) and prints a Studio link.
+   prints the channel name+ID so you can confirm.
+3. `python clipper.py "URL" --draft` — uploads each clip as **private** and
+   prints a Studio link.
+
+> **The two paths want different client types and the same filename.** A
+> *Desktop* client JSON has an `installed` key; a *Web application* one has
+> `web`. `clipper.py --draft` uses `InstalledAppFlow`, which only accepts
+> `installed`, so pointing it at a Web client breaks it — and vice versa. If you
+> want both, keep the web one at `client_secrets.json` and pass the desktop one
+> to the CLI separately. Most people just use the button.
+
+> The two paths also authenticate **independently**: connecting in the web app
+> does not create `token.pickle`, and the CLI's token does not connect the web
+> app.
 
 > Free quota ≈ 10,000 units/day; each upload ≈ 1,600 units (~6/day). Downloading
-> and local cutting are free.
+> and local cutting are free. Six uploads a day is the real ceiling here.
 
 ## Speed & quality notes
 - **Source capped at 1080p + H.264** so you don't download a 4K/AV1 file just to

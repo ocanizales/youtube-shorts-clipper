@@ -68,11 +68,26 @@ def init_db() -> None:
             opts TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, thumb TEXT);
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at);
         CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_events(user_id, created_at);
+        -- One connected YouTube channel per user. `creds` is the JSON form of a
+        -- google.oauth2.credentials.Credentials, refresh token included: that is
+        -- what makes "connect once" work instead of re-consenting every upload.
+        -- It is effectively a password to the channel's upload scope — see the
+        -- warning in web/youtube.py about who can read this file.
+        CREATE TABLE IF NOT EXISTS youtube_accounts (
+            user_id TEXT PRIMARY KEY, channel_id TEXT, channel_title TEXT,
+            creds TEXT NOT NULL, connected_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         """)
         # Idempotent migration for DBs created before the hero-thumbnail column.
         cols = {r["name"] for r in c.execute("PRAGMA table_info(jobs)")}
         if "thumb" not in cols:
             c.execute("ALTER TABLE jobs ADD COLUMN thumb TEXT")
+        # Upload jobs ride the same queue as renders so they inherit the worker,
+        # the progress plumbing and the polling UI. `kind` is what the worker
+        # branches on; existing rows are renders.
+        if "kind" not in cols:
+            c.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'render'")
+        if "result_url" not in cols:
+            c.execute("ALTER TABLE jobs ADD COLUMN result_url TEXT")
 
 
 # ── users ────────────────────────────────────────────────────────────────────
@@ -183,12 +198,12 @@ def subscribe_newsletter(email: str, user_id=None) -> None:
 
 
 # ── jobs (queue + status) ────────────────────────────────────────────────────
-def create_job(job_id, user_id, source, is_upload, opts) -> None:
+def create_job(job_id, user_id, source, is_upload, opts, kind="render") -> None:
     with connect() as c:
-        c.execute("INSERT INTO jobs (id,user_id,source,is_upload,opts,stage,created_at,updated_at) "
-                  "VALUES (?,?,?,?,?,?,?,?)",
+        c.execute("INSERT INTO jobs (id,user_id,source,is_upload,opts,kind,stage,"
+                  "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
                   (job_id, user_id, source, int(is_upload), json.dumps(opts),
-                   "Queued", _now(), _now()))
+                   kind, "Queued", _now(), _now()))
 
 
 def get_job(job_id):
@@ -222,6 +237,46 @@ def claim_next_job():
         c.execute("UPDATE jobs SET status='running', updated_at=? WHERE id=?",
                   (_now(), r["id"]))
     return get_job(r["id"])
+
+
+# ── connected YouTube channels ───────────────────────────────────────────────
+def save_youtube_account(user_id, channel_id, channel_title, creds_json) -> None:
+    """Insert or update the channel a user has connected.
+
+    Keyed by user_id, so re-connecting REPLACES the previous channel rather than
+    accumulating them. That is deliberate: "which channel does this upload go to"
+    must have exactly one answer at all times.
+    """
+    with connect() as c:
+        c.execute(
+            "INSERT INTO youtube_accounts (user_id,channel_id,channel_title,creds,"
+            "connected_at,updated_at) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET channel_id=excluded.channel_id, "
+            "channel_title=excluded.channel_title, creds=excluded.creds, "
+            "updated_at=excluded.updated_at",
+            (user_id, channel_id, channel_title, creds_json, _now(), _now()))
+
+
+def get_youtube_account(user_id):
+    if not user_id:
+        return None
+    with connect() as c:
+        r = c.execute("SELECT * FROM youtube_accounts WHERE user_id=?",
+                      (user_id,)).fetchone()
+        return dict(r) if r else None
+
+
+def update_youtube_creds(user_id, creds_json) -> None:
+    """Persist a refreshed access token. Called after google refreshes it, so the
+    next upload does not have to refresh again."""
+    with connect() as c:
+        c.execute("UPDATE youtube_accounts SET creds=?, updated_at=? WHERE user_id=?",
+                  (creds_json, _now(), user_id))
+
+
+def delete_youtube_account(user_id) -> None:
+    with connect() as c:
+        c.execute("DELETE FROM youtube_accounts WHERE user_id=?", (user_id,))
 
 
 if __name__ == "__main__":
