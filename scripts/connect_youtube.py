@@ -34,11 +34,24 @@ TOKEN = ROOT / "token.pickle"
 
 def _save(creds) -> dict:
     """Persist as token.pickle, 0600 — it holds a refresh token, which is
-    long-lived write access to the channel."""
+    long-lived write access to the channel.
+
+    Reading back the channel name is best-effort and must never fail the
+    connect. The approval has already happened at this point and the refresh
+    token is the thing worth keeping; if the name lookup dies — the YouTube Data
+    API not yet enabled on the project is the common one — the account is still
+    connected. Reporting that as a failure sent one user round the whole consent
+    flow again for nothing.
+    """
     fd = os.open(TOKEN, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as fh:
         pickle.dump(creds, fh)
-    chan = yt._fetch_channel(creds)
+    try:
+        chan = yt._fetch_channel(creds)
+    except Exception as exc:  # noqa: BLE001 — connected either way
+        detail = "the YouTube Data API is not enabled on this project" \
+            if "accessNotConfigured" in str(exc) else str(exc)[:200]
+        return {"id": "", "title": "", "warning": detail}
     # Cache the label so the dashboard's state probe costs no API call.
     (ROOT / ".youtube_channel").write_text(chan["title"])
     return chan
@@ -72,8 +85,11 @@ def cmd_poll(device_code: str) -> int:
                           "detail": payload if isinstance(payload, str) else ""}))
         return 0
     chan = _save(payload)
-    print(json.dumps({"status": "connected", "channel_title": chan["title"],
-                      "channel_id": chan["id"]}))
+    out = {"status": "connected", "channel_title": chan["title"],
+           "channel_id": chan["id"]}
+    if chan.get("warning"):
+        out["warning"] = chan["warning"]
+    print(json.dumps(out))
     return 0
 
 
@@ -99,7 +115,10 @@ def interactive() -> int:
             print(f"  [auth] {payload}")
             return 1
         chan = _save(payload)
-        print(f"\n  Connected to “{chan['title']}”.")
+        print(f"\n  Connected to “{chan['title'] or 'your channel'}”.")
+        if chan.get("warning"):
+            print(f"  [warn] {chan['warning']} — the connection is fine, but "
+                  f"uploads will fail until that is fixed.")
         print(f"  Wrote {TOKEN.name}; `clipper.py --draft` will use it.")
         return 0
     print("  [auth] the code expired before it was approved.")
