@@ -11,6 +11,7 @@ Clips are saved locally by default; nothing is uploaded unless you pass --draft
 """
 
 import argparse
+import collections
 import os
 import pickle
 import re
@@ -203,15 +204,28 @@ def download_video(url: str, on_progress=None) -> Path:
         cmd += ["--ffmpeg-location", _FFMPEG_DIR]
     proc = subprocess.Popen(cmd + [url], stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True)
+    # Keep the tail of yt-dlp's own output. stderr is merged into stdout here,
+    # so the only record of WHY a download died arrives on this loop — and every
+    # line that is not a progress percentage used to be read and dropped,
+    # leaving a bare "yt-dlp failed" with the diagnosis discarded. A ring buffer
+    # costs nothing on success and is the whole story on failure.
+    tail = collections.deque(maxlen=12)
     for line in proc.stdout:                      # stream + parse % as it downloads
         m = _PCT.search(line)
         if m:
             pct = float(m.group(1))
             (on_progress or (lambda p: print(f"\r[download] {p:5.1f}%", end="")))(pct)
+        elif line.strip():
+            tail.append(line.rstrip())
     proc.wait()
     print()
     if proc.returncode != 0:
-        sys.exit("[error] yt-dlp failed.")
+        detail = "\n".join(f"  {ln}" for ln in tail) or "  (no output captured)"
+        sys.exit(f"[error] yt-dlp failed (exit {proc.returncode}). Its last "
+                 f"output:\n{detail}\n"
+                 f"[hint] A failure partway through a download is usually "
+                 f"transient — YouTube throttles datacenter IPs. Retrying "
+                 f"generally works, and the partial file is reused.")
 
     media = _find_media(vid)
     if not media:
