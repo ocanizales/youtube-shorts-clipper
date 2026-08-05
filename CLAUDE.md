@@ -68,6 +68,25 @@ python clipper.py ...  # CLI path
   not `(#3)`, because YouTube parses `#` in a title as a hashtag.
 - **Don't let the metadata model invent facts.** The prompt forbids years,
   scores, stages, and results that aren't in the commentary — a 3B model will
-  otherwise date a clip to "the 2023 finals" on its own.
+  otherwise date a clip to "the 2023 finals" on its own. **Names are checked, not
+  just forbidden:** `_ollama_metadata` runs `lol_kb.ungrounded_names` +
+  `ungrounded_claims` over the title, hook and description, retries once naming
+  what was invented, then falls back to the hook title. Prompting alone was not
+  enough — it lowers the rate and the residue is silent and confident.
+- **An empty briefing means name nobody.** When `context_brief` comes back empty
+  the prompt must tell the model to title the *play*, never a player or team.
+  The old prompt still said "lead with the player or team name" with nothing to
+  lead from, and a 3B model fills that gap with the two names it knows: T1 and
+  Faker. That was the wrong-team bug, not a model defect.
+- **Non-T1 players carry no team in `lol_kb.PLAYERS`, deliberately.** A player
+  implies their team in `detect_entities`, so a stale roster entry does not sit
+  quietly — it manufactures a false attribution and feeds it to the model as
+  briefing fact. Record the role (durable); let the commentary supply the team
+  (volatile). T1 is the exception because the user maintains it.
+- **An IGN that is also an ordinary English word needs two signals.**
+  `AMBIGUOUS_IGNS` / `AMBIGUOUS_TEAM_FORMS` require League context *and* the
+  original capitalisation. Without it, "what a bang, the wolf pack collapses"
+  detected Bang + Wolf and attributed the clip to T1. Same reasoning as the
+  SAFE/CONTEXTUAL split on captions — it was just never applied to detection.
 - Commit + push every meaningful change with well-commented code (standing rule).
 - `BUSINESS.md` covers the sellable-product angle; unlimited promo code is "bullet".

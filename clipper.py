@@ -1094,42 +1094,100 @@ def _ollama_metadata(transcript: str, idx: int) -> dict | None:
     import json
     import urllib.request
     brief = lol_kb.context_brief(transcript)
-    prompt = (
-        "You write YouTube Shorts metadata for League of Legends esports "
-        "highlight clips. Spoken commentary from this clip:\n"
-        f'"{transcript[:1200]}"\n\n'
-        + (f"Who and what this clip is about:\n{brief}\n\n" if brief else "")
-        + "Fields:\n"
-        "- title: catchy, under 70 characters, no emoji, NO hashtags, faithful "
-        "to the commentary. Lead with the player or team name if one is named.\n"
-        "- hook: one short phrase, under 60 characters, leading with the main "
-        "topic and why it is worth watching. This is the only text a viewer "
-        "sees before tapping 'more', so no throat-clearing.\n"
-        "- description: 2-3 sentences of context for search — who, what "
-        "happened, which team/event. Use the names from the briefing.\n"
-        "- hashtags: 4-6 single words, no # symbol, specific over generic\n\n"
-        "Only state what the commentary or the briefing actually says. Never "
-        "invent a year, a score, a tournament stage, or a result — a made-up "
-        "detail in a published description is worse than a vague one.")
-    body = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False,
-            "format": _META_SCHEMA, "options": {"temperature": 0.4, "num_predict": 320}}
-    try:
+
+    def _prompt(scold: list[str] | None = None) -> str:
+        # The briefing is what the model is ALLOWED to know. When it is empty the
+        # old prompt still said "lead with the player or team name" and "use the
+        # names from the briefing", so a clip the KB could not identify asked a 3B
+        # model to name names with nothing to name them from — and it reliably
+        # reached for the two it knows best, T1 and Faker. Naming is now opt-in on
+        # the briefing existing.
+        known = (f"Who and what this clip is about:\n{brief}\n\n" if brief else
+                 "No briefing is available for this clip: the knowledge base did "
+                 "not recognise anybody in it. Do NOT name any player, team, "
+                 "league or tournament — not one, however likely it seems. Title "
+                 "the PLAY itself ('insane baron steal', 'flawless teamfight').\n\n")
+        retry = ""
+        if scold:
+            retry = ("\nYour previous answer named " + ", ".join(scold) +
+                     ", which appears nowhere in the commentary or the briefing. "
+                     "That is invented. Rewrite without those names.\n")
+        return (
+            "You write YouTube Shorts metadata for League of Legends esports "
+            "highlight clips. Spoken commentary from this clip:\n"
+            f'"{transcript[:1200]}"\n\n'
+            + known
+            + "Fields:\n"
+            "- title: catchy, under 70 characters, no emoji, NO hashtags, faithful "
+            "to the commentary. Lead with a player or team name ONLY if the "
+            "commentary or the briefing names one.\n"
+            "- hook: one short phrase, under 60 characters, leading with the main "
+            "topic and why it is worth watching. This is the only text a viewer "
+            "sees before tapping 'more', so no throat-clearing.\n"
+            "- description: 2-3 sentences of context for search — who, what "
+            "happened, which team/event. Use ONLY names that appear above.\n"
+            "- hashtags: 4-6 single words, no # symbol, specific over generic\n\n"
+            "Only state what the commentary or the briefing actually says. Never "
+            "invent a year, a score, a tournament stage, or a result — a made-up "
+            "detail in a published description is worse than a vague one.\n"
+            "The same rule binds names hardest of all: never state a player, "
+            "team, region or tournament that does not appear above. A clip "
+            "credited to the wrong team is worse than a clip credited to nobody, "
+            "so when you do not know who is playing, describe the play."
+            + retry)
+
+    def _ask(prompt: str) -> dict | None:
+        body = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False,
+                "format": _META_SCHEMA,
+                "options": {"temperature": 0.4, "num_predict": 320}}
         req = urllib.request.Request(
             f"{OLLAMA_HOST}/api/generate", data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=120) as r:
-            meta = json.loads(json.load(r)["response"])
-        title = str(meta.get("title", "")).strip().strip('"')
-        title = re.sub(r"#\w+", "", title).strip()   # hashtags belong in the description
-        hook = str(meta.get("hook", "")).strip().strip('"')
-        desc = str(meta.get("description", "")).strip()
-        tags = [re.sub(r"\W", "", str(t)) for t in meta.get("hashtags", [])]
-        tags = [t for t in tags if t][:6]
+            raw = json.loads(json.load(r)["response"])
+        title = str(raw.get("title", "")).strip().strip('"')
+        title = re.sub(r"#\w+", "", title).strip()  # hashtags belong in the description
         if not title:
             return None
-        print(f"[meta {idx}] AI title: {title}")
-        return {"title": title[:90], "hook": (hook or title)[:120],
-                "description": desc[:800], "tags": tags}
+        return {"title": title,
+                "hook": str(raw.get("hook", "")).strip().strip('"'),
+                "description": str(raw.get("description", "")).strip(),
+                "tags": [t for t in (re.sub(r"\W", "", str(t))
+                                     for t in raw.get("hashtags", [])) if t][:6]}
+
+    try:
+        scold: list[str] | None = None
+        # Two attempts, then honest fallback. Prompting lowers the invention rate
+        # but cannot zero it, and the failure is silent — fluent, confident, wrong.
+        # The vocabulary of nameable things is closed, so an ungrounded name is
+        # detectable after the fact; see lol_kb.ungrounded_names.
+        for attempt in (1, 2):
+            meta = _ask(_prompt(scold))
+            if meta is None:
+                return None
+            # The hook is checked too, and that is not padding: `write_metadata`
+            # feeds it to `build_description` as the first line of the caption,
+            # which is the one piece of text every viewer reads. An unchecked
+            # hook is a published claim.
+            published = f"{meta['title']} {meta['hook']} {meta['description']}"
+            bad = (lol_kb.ungrounded_names(published, transcript, brief)
+                   + lol_kb.ungrounded_claims(published, transcript, brief))
+            if not bad:
+                # Tags are dropped individually rather than failing the whole
+                # answer: one invented tag does not make the title wrong.
+                meta["tags"] = [
+                    t for t in meta["tags"]
+                    if not lol_kb.ungrounded_names(t, transcript, brief)
+                    and not lol_kb.ungrounded_claims(t, transcript, brief)]
+                print(f"[meta {idx}] AI title: {meta['title']}")
+                return {"title": meta["title"][:90],
+                        "hook": (meta["hook"] or meta["title"])[:120],
+                        "description": meta["description"][:800],
+                        "tags": meta["tags"]}
+            print(f"[meta {idx}] attempt {attempt} invented {', '.join(bad)}"
+                  + (" — retrying" if attempt == 1 else " — using hook title"))
+            scold = bad
+        return None
     except Exception as ex:
         print(f"[meta {idx}] Ollama unavailable ({ex.__class__.__name__}) — using hook title")
         return None

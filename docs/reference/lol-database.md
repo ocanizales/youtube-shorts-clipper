@@ -16,6 +16,8 @@ for *spellings and hashtags*.
 | Captions | `lol_kb.correct_words()` | Repairs mishears that still get through, on the timed word list so captions keep their timing. |
 | Metadata | `lol_kb.context_brief()` | Briefs the local 3B model on only the entities this clip mentions. Without it the model invents biographies. |
 | Metadata | `lol_kb.niche_hashtags()` | Turns detected entities into the 2–3 specific hashtags the Shorts SEO rules want (#Faker #T1 beats another #Gaming). |
+| Metadata | `lol_kb.ungrounded_names()` | Checks generated text back against the transcript + briefing. A team or player named in neither was invented; `_ollama_metadata` retries once, then falls back. |
+| Metadata | `lol_kb.ungrounded_claims()` | Same check for *events* — "Baron Steal" over commentary that never says Baron. |
 
 Corrections are split SAFE / CONTEXTUAL on purpose — see the module docstring.
 Words a caster genuinely uses ("Korea", "career", "gang") are **never** rewritten;
@@ -118,3 +120,78 @@ than a mishear.
   Worlds final appearances, winning back-to-back titles in 2023 and 2024.
 * **Classic SKT dominance (2015–2016)** — MaRin/Duke, Bengi, Faker, Bang, Wolf.
   Back-to-back Worlds titles in 2015 and 2016 with unmatched dominance.
+
+---
+
+## 4. Scope beyond T1 (added 2026-08-05)
+
+Sections 1–3 are the user's verbatim dump and stay that way. This section records
+what `lol_kb.py` carries **in addition**, and why it is shaped the way it is.
+
+### Why it was added
+
+Titles were coming back with the wrong teams and players. Two causes, both
+measured before the fix:
+
+1. **The tables knew only T1.** For a Gen.G/HLE clip naming Chovy, Kiin, Peanut,
+   Ruler and Zeka, `detect_entities` returned *nothing* and `context_brief`
+   returned `""`. The prompt still ordered the model to "lead with the player or
+   team name" and to "use the names from the briefing" — with no briefing. A 3B
+   model handed that gap fills it from pretraining, and what it knows about
+   League is T1 and Faker.
+2. **Ordinary English words were treated as roster hits.** "What a bang that was,
+   the wolf pack collapses mid" detected the players *Bang* and *Wolf*, and the
+   player-implies-team rule then asserted **T1** over a clip containing no T1.
+   The model was not hallucinating there — it was being told.
+
+### What is in the tables now
+
+* **~35 organisations** across LCK / LPL / LEC / LTA, each with its aliases
+  (`Gen.G` / `GenG` / `GEN`, `Dplus KIA` / `DWG` / `DAMWON`).
+* **~60 additional players** with full name and role.
+
+### The deliberate gap: no team on non-T1 players
+
+Every player added outside the T1 block carries `team=""`, on purpose.
+
+`detect_entities` promotes a player to their team even when the caster never says
+it. That is useful and correct for T1, whose roster the user maintains here. For
+everyone else it is a trap: rosters churn every offseason, and a stale team in
+this table would not sit quietly — it would manufacture a false attribution and
+hand it to the metadata model *as briefing fact*, which is the exact failure this
+whole module exists to prevent.
+
+So the durable fact (a player's **role**) is recorded and the volatile one (their
+**team**) is left to the commentary. `context_brief` states the absence out loud —
+"this briefing does NOT say which team, do not name one unless the commentary
+does" — because an unqualified "- Chovy: mid." is an invitation to guess.
+
+**If you add a team to a player here, you are asserting a roster you must then
+maintain.** Prefer leaving it empty.
+
+Blurbs follow the same rule: no standings, no "current champions", no dated
+placings. Org identity is stable; results go stale in weeks.
+
+### Ambiguity guards
+
+`AMBIGUOUS_IGNS` and `AMBIGUOUS_TEAM_FORMS` list the names that are also ordinary
+English — *Bang, Wolf, Duke, Ruler, Peanut, Bin, Knight, Scout, Caps, Impact,
+Liquid, MAD, Excel*. These need two signals before they count as a person or an
+org: League context **and** the capitalisation Whisper gives names it recognises.
+This is the same SAFE/CONTEXTUAL discipline the caption tables already used,
+finally applied to entity detection.
+
+`ITEM_POSSESSIVE_TAILS` handles the one collision inside the game itself:
+"Doran's Blade" is the starting item, not T1's top laner.
+
+### Grounding
+
+Prompting lowers the invention rate; it does not zero it, and the failure is
+silent. But the vocabulary of nameable things is closed, so `ungrounded_names`
+and `ungrounded_claims` can check the model's output back against the transcript
+and the briefing after the fact. On a hit, `_ollama_metadata` retries once naming
+the offending words, then falls back to the hook title rather than publishing
+something it cannot support.
+
+Aliases resolve before the check, so calling T1 "SKT" or Worlds "the World
+Championship" counts as grounded rather than invented.
