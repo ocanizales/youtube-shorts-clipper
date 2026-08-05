@@ -113,4 +113,8 @@ python clipper.py ...  # CLI path
   detected Bang + Wolf and attributed the clip to T1. Same reasoning as the
   SAFE/CONTEXTUAL split on captions — it was just never applied to detection.
 - Commit + push every meaningful change with well-commented code (standing rule).
-- `BUSINESS.md` covers the sellable-product angle; unlimited promo code is "bullet".
+- `BUSINESS.md` covers the sellable-product angle. **The owner's unlimited promo
+  code is deliberately not written down here** — this repo went public on
+  2026-08-05 and a whitelist code in a public file is a free-access coupon for
+  anyone who reads it. Seed codes at runtime (`db.create_promo(...)`) and keep
+  the values in `data.db`, which is gitignored.
