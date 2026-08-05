@@ -8,6 +8,7 @@ A separate process (web/worker.py) does the encoding. Run both:
 Then open http://localhost:5000
 """
 
+import json
 import os
 import secrets as pysecrets
 import sys
@@ -176,10 +177,76 @@ def _safe_clip(name: str) -> Path | None:
     return path
 
 
+def _is_loopback() -> bool:
+    """True when the request came from this machine.
+
+    The setup paste box below writes a credential to disk, so it must not be
+    reachable from the network. The dashboard on :8080 is bound to 0.0.0.0 and
+    this app can be too; over `ssh -L` the request still arrives from 127.0.0.1,
+    so the intended workflow passes and a remote one does not.
+
+    Deliberately reads request.remote_addr and NOT X-Forwarded-For: that header
+    is caller-supplied and would let anyone claim to be localhost.
+    """
+    return request.remote_addr in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+
+@app.post("/youtube/setup")
+def youtube_setup():
+    """Accept a pasted client_secrets.json over loopback, once.
+
+    This exists because the file has to get from the machine running the browser
+    onto this box, and every route people reach for is worse: the GitHub web UI
+    ignores .gitignore, and the dashboard's /intake files what it receives into
+    an Obsidian vault that has a GitHub remote. Both turn a local secret into a
+    pushed one. This writes to the single path that is already gitignored, 0600,
+    and never reads it back out.
+    """
+    u = current_user()
+    if not u:
+        return jsonify(error="Sign in with your email first."), 401
+    if not _is_loopback():
+        return jsonify(error="Setup is only available from this machine. "
+                             "Use: ssh -L 5000:localhost:5000"), 403
+    # Replacing a working credential silently would be a foothold for anyone who
+    # got this far; make it deliberate instead.
+    if yt.is_configured() and not (request.get_json(silent=True) or {}).get("replace"):
+        return jsonify(error="Already set up. Send replace:true to overwrite."), 409
+
+    raw = (request.get_json(silent=True) or {}).get("json", "")
+    if not raw.strip():
+        return jsonify(error="Paste the JSON you downloaded from Google."), 400
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        return jsonify(error=f"That is not valid JSON: {exc}"), 400
+    # Reject the wrong client type here rather than at the OAuth redirect, where
+    # Google's error names neither the file nor the cause.
+    if "installed" in data and "web" not in data:
+        return jsonify(error="That is a Desktop client. The button needs a "
+                             "Web application client — see SETUP.md."), 400
+    if "web" not in data:
+        return jsonify(error="No 'web' key — not an OAuth client file."), 400
+    want = yt.redirect_uri()
+    if want not in data["web"].get("redirect_uris", []):
+        return jsonify(error=f"This client has no redirect URI {want}. "
+                             "Add it in the Console, re-download, paste again."), 400
+
+    # Write 0600 before any bytes land, so it is never briefly world-readable.
+    path = yt.CLIENT_SECRETS
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh)
+    return jsonify(ok=True, client_id=data["web"].get("client_id", "")[:24] + "…")
+
+
 @app.get("/youtube/status")
 def youtube_status():
     u = current_user()
-    return jsonify(yt.status_for(u["id"] if u else None))
+    s = yt.status_for(u["id"] if u else None)
+    # The UI only offers the paste box where it would actually work.
+    s["can_setup"] = _is_loopback()
+    return jsonify(s)
 
 
 @app.get("/youtube/connect")

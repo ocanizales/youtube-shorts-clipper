@@ -129,6 +129,87 @@ def test_disconnect_forgets_the_channel():
     assert db.get_youtube_account(u["id"]) is None
 
 
+# ── the setup paste box writes a credential to disk ──────────────────────────
+WEB_CLIENT = {"web": {"client_id": "1-x.apps.googleusercontent.com",
+                      "client_secret": "shh", "redirect_uris": []}}
+
+
+def _client_json(**over):
+    d = {"web": dict(WEB_CLIENT["web"])}
+    d["web"]["redirect_uris"] = [yt.redirect_uri()]
+    d["web"].update(over)
+    return json.dumps(d)
+
+
+def _post_setup(c, payload, addr="127.0.0.1"):
+    return c.post("/youtube/setup", json=payload, environ_base={"REMOTE_ADDR": addr})
+
+
+def test_setup_requires_an_account():
+    assert _post_setup(client(), {"json": _client_json()}).status_code == 401
+
+
+def test_setup_refuses_non_loopback():
+    """It writes client_secrets.json — a remote caller must never reach it."""
+    r = _post_setup(signed_in(), {"json": _client_json()}, addr="10.0.0.5")
+    assert r.status_code == 403
+
+
+def test_setup_ignores_x_forwarded_for():
+    """The header is caller-supplied; trusting it would undo the loopback gate."""
+    c = signed_in()
+    r = c.post("/youtube/setup", json={"json": _client_json()},
+               headers={"X-Forwarded-For": "127.0.0.1"},
+               environ_base={"REMOTE_ADDR": "10.0.0.5"})
+    assert r.status_code == 403, "spoofed X-Forwarded-For got through"
+
+
+# These send replace=True so they clear the "already set up" 409 and reach the
+# validation they are actually testing — the owner's real client_secrets.json is
+# often present when the suite runs. Nothing is written: every case below is
+# rejected before the write, which is itself part of what is being asserted.
+def test_setup_rejects_a_desktop_client():
+    r = _post_setup(signed_in(), {"json": json.dumps({"installed": {"client_id": "x"}}),
+                                  "replace": True})
+    assert r.status_code == 400
+    assert "desktop" in r.get_json()["error"].lower()
+
+
+def test_setup_rejects_junk_and_wrong_redirect_uri():
+    c = signed_in()
+    assert _post_setup(c, {"json": "not json", "replace": True}).status_code == 400
+    assert _post_setup(c, {"json": "", "replace": True}).status_code == 400
+    bad = json.dumps({"web": {"client_id": "x", "redirect_uris": ["http://elsewhere/cb"]}})
+    r = _post_setup(c, {"json": bad, "replace": True})
+    assert r.status_code == 400 and "redirect" in r.get_json()["error"].lower()
+
+
+def test_setup_writes_0600_and_needs_replace_to_overwrite():
+    if yt.CLIENT_SECRETS.exists():
+        return  # never clobber the owner's real credential during a test run
+    c = signed_in()
+    try:
+        assert _post_setup(c, {"json": _client_json()}).status_code == 200
+        mode = yt.CLIENT_SECRETS.stat().st_mode & 0o777
+        assert mode == 0o600, f"secret written world-readable: {mode:o}"
+        # A second write must be deliberate.
+        assert _post_setup(c, {"json": _client_json()}).status_code == 409
+        assert _post_setup(c, {"json": _client_json(), "replace": True}).status_code == 200
+    finally:
+        yt.CLIENT_SECRETS.unlink(missing_ok=True)
+
+
+def test_setup_never_echoes_the_secret():
+    if yt.CLIENT_SECRETS.exists():
+        return
+    c = signed_in()
+    try:
+        body = _post_setup(c, {"json": _client_json()}).get_data(as_text=True)
+        assert "shh" not in body, "response leaked the client_secret"
+    finally:
+        yt.CLIENT_SECRETS.unlink(missing_ok=True)
+
+
 # ── hard rules that must not drift ───────────────────────────────────────────
 def test_uploads_are_private_and_that_is_not_a_parameter():
     """CLAUDE.md: never auto-published. Enforced in code, not by a default —

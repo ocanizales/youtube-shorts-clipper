@@ -102,6 +102,16 @@
          background:#c4302b;color:#fff;font-size:14px;font-family:inherit}
   .ytbtn.ghost{background:var(--surface-2);color:var(--text)}
   .ytbtn[disabled]{opacity:.55;cursor:default}
+  .ytsetup{margin:10px 0 0;padding:14px;background:var(--surface);
+           border:1px solid var(--line);border-radius:10px}
+  .ytsetup label{display:block;font-size:12.5px;color:var(--muted,#9a9a9a);margin-bottom:8px}
+  .ytsetup textarea{width:100%;background:var(--surface-2);color:var(--text);
+           border:1px solid var(--line);border-radius:8px;padding:10px;
+           font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}
+  .ytsetup .row{display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap}
+  .ytsetup .msg{font-size:12.5px;color:var(--muted,#9a9a9a)}
+  .ytsetup .msg.bad{color:#FF8A8A}
+  .ytsetup .msg.good{color:#7CFFB2}
   .send{display:block;width:100%;margin-top:8px;padding:7px 10px;border-radius:8px;
         border:1px solid var(--line);background:#c4302b;color:#fff;font-size:13px;
         font-family:inherit;cursor:pointer}
@@ -231,6 +241,22 @@
         <div class="who" id="yt-who" role="status" aria-live="polite"></div>
         <button type="button" class="ytbtn" id="yt-connect" hidden>Connect YouTube</button>
         <button type="button" class="ytbtn ghost" id="yt-disconnect" hidden>Disconnect</button>
+        <button type="button" class="ytbtn ghost" id="yt-setup" hidden>Paste client_secrets.json</button>
+      </div>
+
+      <!-- Setup paste box. Shown only when this browser is on the same machine
+           as the app, because the route refuses anything else. -->
+      <div class="ytsetup" id="ytsetup" hidden>
+        <label for="yt-json">Paste the whole JSON you downloaded from Google Cloud
+          Console, then Save. It is written to client_secrets.json here, mode
+          600, and is already gitignored.</label>
+        <textarea id="yt-json" rows="6" spellcheck="false"
+                  placeholder='{"web":{"client_id":"…","client_secret":"…"}}'></textarea>
+        <div class="row">
+          <button type="button" class="ytbtn" id="yt-save">Save</button>
+          <button type="button" class="ytbtn ghost" id="yt-cancel">Cancel</button>
+          <span class="msg" id="yt-msg" role="status" aria-live="polite"></span>
+        </div>
       </div>
 
       <div class="results" id="results" tabindex="-1"></div>
@@ -327,19 +353,25 @@ async function refreshYT(){
 
   if(!s.configured){
     // No client_secrets.json yet. Say what to do rather than showing a button
-    // that can only fail.
+    // that can only fail. When the browser is on this machine we can also just
+    // take the file here, which beats every other way of moving it across.
     who.innerHTML = 'YouTube posting not set up yet.' +
-      '<small>Add <code>client_secrets.json</code> to the project root — see SETUP.md. ' +
+      '<small>' + (s.can_setup
+        ? 'Paste the JSON from Google Cloud Console below. '
+        : 'Add <code>client_secrets.json</code> to the project root — see SETUP.md. ') +
       'Redirect URI: <code>' + s.redirect_uri + '</code></small>';
     conn.hidden = true; dis.hidden = true;
+    $('yt-setup').hidden = !s.can_setup;
   } else if(s.connected){
     who.innerHTML = 'Connected to <b>' + (s.channel_title || 'your channel') + '</b>' +
       '<small>Clips upload as private drafts. Nothing is ever published automatically.</small>';
     conn.hidden = true; dis.hidden = false;
+    $('yt-setup').hidden = true; $('ytsetup').hidden = true;
   } else {
     who.innerHTML = 'Send finished clips straight to YouTube.' +
       '<small>They arrive as private drafts you review in Studio before publishing.</small>';
     conn.hidden = false; dis.hidden = true;
+    $('yt-setup').hidden = true; $('ytsetup').hidden = true;
   }
   document.querySelectorAll('button.send').forEach(b => {
     if(!b.dataset.busy && !b.dataset.done){
@@ -356,6 +388,46 @@ $('yt-connect').addEventListener('click', () => {
   window.open('/youtube/connect', '_blank', 'noopener');
   let n = 0;
   const t = setInterval(() => { refreshYT(); if(++n > 60 || ytReady) clearInterval(t); }, 2000);
+});
+
+$('yt-setup').addEventListener('click', () => {
+  $('ytsetup').hidden = false;
+  $('yt-setup').hidden = true;
+  $('yt-json').focus();
+});
+
+$('yt-cancel').addEventListener('click', () => {
+  // Clear the box on the way out: it holds a client secret, and leaving it in
+  // the DOM keeps it in the page for anyone who walks up to the screen.
+  $('yt-json').value = '';
+  $('yt-msg').textContent = '';
+  $('ytsetup').hidden = true;
+  $('yt-setup').hidden = false;
+});
+
+$('yt-save').addEventListener('click', async () => {
+  const box = $('yt-json'), msg = $('yt-msg'), btn = $('yt-save');
+  msg.className = 'msg'; msg.textContent = 'Saving…';
+  btn.disabled = true;
+  let r, body;
+  try {
+    r = await fetch('/youtube/setup', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({json: box.value})
+    });
+    body = await r.json();
+  } catch(e) {
+    msg.className = 'msg bad'; msg.textContent = 'Could not reach the server.';
+    btn.disabled = false; return;
+  }
+  btn.disabled = false;
+  if(!r.ok){ msg.className = 'msg bad'; msg.textContent = body.error || 'Failed.'; return; }
+  box.value = '';                     // don't leave the secret sitting in the DOM
+  msg.className = 'msg good';
+  msg.textContent = 'Saved ' + body.client_id + ' — now click Connect YouTube.';
+  $('ytsetup').hidden = true;
+  refreshYT();
 });
 
 window.addEventListener('storage', e => { if(e.key === 'yt_ping') refreshYT(); });
