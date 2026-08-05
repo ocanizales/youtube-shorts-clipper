@@ -125,12 +125,28 @@ There are two ways in, and they need *different* OAuth client types. Pick one.
 
 One-time setup, ~5 minutes in the browser:
 
-1. **Google Cloud Console** → create or pick a project.
+1. **Google Cloud Console** → create or pick a project. **Sign in with the Google
+   account that owns the YouTube channel**, not a school or work account. A
+   Workspace-managed account (e.g. a `.edu` one) can have **External** disabled
+   by its administrator, which makes this whole path impossible on that account.
 2. **APIs & Services → Library** → enable **YouTube Data API v3**.
-3. **APIs & Services → OAuth consent screen** → External → fill in app name and
-   your email. While the app is in *Testing*, add your own Google account under
-   **Test users** — without that, sign-in fails with "app not verified".
-4. **Credentials → Create credentials → OAuth client ID → Web application.**
+3. **OAuth consent screen.** Google renamed this to **Google Auth Platform**, so
+   the old "External / Internal" radio is not where the screenshots say:
+
+   - Never configured before? The page shows a **Get started** button. It asks
+     for app name and support email, then an **Audience** step — *that* is where
+     **External** lives. Pick External, add a contact email, accept the policy.
+   - Already configured? The left nav has **Overview / Branding / Audience /
+     Clients / Data Access**. External vs Internal is on **Audience**.
+   - **On a personal @gmail account there is no choice to make** — Internal
+     requires a Workspace organisation, so you are External automatically and
+     the option simply isn't rendered. Nothing is wrong; carry on.
+
+   Then on **Audience**, while publishing status is *Testing*, scroll to
+   **Test users → Add users** and add your own Google address. Skip this and
+   sign-in dies with "app not verified" / `access_denied`.
+4. **Clients → Create client → Application type: Web application.**
+   (Older UI: *Credentials → Create credentials → OAuth client ID*.)
    Under **Authorised redirect URIs** add exactly:
 
    ```
