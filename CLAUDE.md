@@ -42,6 +42,14 @@ python clipper.py ...  # CLI path
   `data.db`, `client_secrets.json` and `.flask_secret` are all gitignored; keep
   it that way. (CLAUDE.md previously claimed a pre-push hook guards this — there
   is no `.git/hooks/pre-push` on this box, so the ignore list is the only guard.)
+- **Never move credentials through GitHub's web upload UI — it does not read
+  `.gitignore`.** On 2026-08-05 `client_secret_*.json` was uploaded that way and
+  landed on `master` as `d937bfa` despite matching two ignore rules; the ignore
+  list only applies to `git add` in a clone. Force-pushed away and the secret
+  rotated. Note what the force-push did *not* do: GitHub kept serving the
+  orphaned commit by SHA afterwards, so **rotation is the fix and history
+  rewriting is only hygiene**. Get secrets here with `scp`, or paste into a
+  heredoc over your own SSH session — never through a git remote.
 - The web app needs `flask` (`web/requirements.txt`); it was missing from `.venv`
   until 2026-08-05. `.venv/bin/pip install -r web/requirements.txt`.
 - Delete the full downloaded VOD at session end — don't let `downloads/` accumulate.
