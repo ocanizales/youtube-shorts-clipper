@@ -157,7 +157,31 @@ One-time setup, ~5 minutes in the browser:
    `redirect_uri_mismatch` error, and it is the single most common way this
    setup fails. Google exempts `localhost` from its HTTPS rule, so no
    certificate is needed.
-5. **Download JSON** → save it as `client_secrets.json` in the project root.
+5. **Download JSON.** It lands on whichever machine is running the browser, so
+   it still has to reach the box running the app. Either:
+
+   - **Paste it in the app.** Start the app, sign in, and the setup strip offers
+     a paste box. It writes `client_secrets.json` for you at mode 600 and
+     rejects a Desktop client or a wrong redirect URI on the spot. Only offered
+     when the browser is on the same machine as the app (over `ssh -L` it is).
+   - **`scp` it**, from the machine that downloaded it:
+
+     ```bash
+     scp ~/Downloads/client_secret_*.json user@host:~/apps/youtube-shorts-clipper/client_secrets.json
+     ```
+
+   Either way, verify before opening the browser again:
+
+   ```bash
+   .venv/bin/python scripts/check_oauth_client.py
+   ```
+
+   > **Never move it through a git remote or the dashboard's `/intake`.** The
+   > GitHub web upload UI does not read `.gitignore`, and `/intake` files what it
+   > receives into an Obsidian vault that has a GitHub remote. Both turn a local
+   > secret into a pushed one. If that has already happened, rotating the secret
+   > is the fix — deleting the commit is not, because GitHub goes on serving it
+   > by SHA.
 6. Restart the web app. Open it over an SSH tunnel so the browser really is at
    `localhost:5000`:
 
