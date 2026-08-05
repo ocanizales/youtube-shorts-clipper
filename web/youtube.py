@@ -29,9 +29,15 @@ works over an SSH tunnel with no certificate. Any OTHER host must be https.
 SECURITY
 --------
 `youtube_accounts.creds` holds a refresh token, which is a long-lived key to the
-upload scope of someone's channel. Anyone who can read `web/app.db` can post to
+upload scope of someone's channel. Anyone who can read `data.db` can post to
 that channel. Keep the DB off shared storage and out of git, and keep
-`client_secrets.json` gitignored (the pre-push hook guards it).
+`client_secrets.json` gitignored — the ignore list is the only guard, there is
+no pre-push hook on this box despite what earlier notes claimed.
+
+The saved blob also carries `client_secret` (see `_save`), and refresh uses that
+stored copy. So resetting the client secret in the Console INVALIDATES every
+already-connected account: rotate first, connect second, or you will have to
+reconnect.
 
 Uploads are ALWAYS `privacyStatus: private`. That is a hard rule in CLAUDE.md and
 it is enforced here in code, not left to a caller's argument — see `upload_draft`.
