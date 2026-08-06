@@ -2100,6 +2100,15 @@ def make_clips(video: Path, *, max_clips=5, clip_len=30, peak_pos=0.72, layout="
                                 cap_size=cap_size, title=title, platform=platform,
                                 progress=progress, ai_meta=ai_meta, endcard=endcard,
                                 translate=translate)
+    # A source shorter than the requested clip length yields NOTHING at all:
+    # find_hype_moments rejects every window whose `start + clip_len` runs past
+    # the end, so a 30s Twitch clip asked for 45s clips returns zero moments and
+    # the render "succeeds" with an empty clips/ directory. Clamp instead — the
+    # whole source becomes the clip, which is what a short source wants anyway.
+    dur = int(_duration(video))
+    if dur and clip_len > dur:
+        print(f"[clip] source is only {dur}s — clamping clip length from {clip_len}s")
+        clip_len = max(5, dur)
     moments = find_hype_moments(video, clip_len, max_clips, peak_pos)
     clips = []
     for i, t in enumerate(moments, 1):
@@ -2258,7 +2267,8 @@ def upload_draft(clip: Path, title: str, idx: int):
 # ── main ─────────────────────────────────────────────────────────────────────
 def main():
     p = argparse.ArgumentParser(description="Cut a YouTube VOD into 9:16 Shorts clips.")
-    p.add_argument("url", nargs="?", help="YouTube video URL")
+    p.add_argument("url", nargs="?",
+                   help="YouTube or Twitch URL, or a path to a local video file")
     p.add_argument("--max-clips", type=int, default=5, help="clips to produce (5)")
     p.add_argument("--clip-len", type=int, default=30, help="seconds per clip (30)")
     p.add_argument("--peak-pos", type=float, default=0.72,
@@ -2321,7 +2331,8 @@ def main():
         make_sample(src, at=a.at)
         return
     if not a.url:
-        p.error("a YouTube URL is required (unless using --list-channels or --rethumb)")
+        p.error("a URL or local video file is required "
+                "(unless using --list-channels or --rethumb)")
 
     if a.layout == "whole":
         # Length is fixed and the count comes from the source's duration, so both
@@ -2338,7 +2349,16 @@ def main():
               f"| layout=whole (16:9)\n")
     else:
         print(f"\n=== LoL Clipper ===\n{a.max_clips} x {a.clip_len}s | layout={a.layout}\n")
-    video = download_video(a.url)
+    # Same idiom --sample has always used: an argument that names a file on disk
+    # is that file, not something to hand to yt-dlp. This is how an uploaded
+    # video reaches the pipeline — the dashboard stages the upload and passes
+    # its path here, so nothing has to be re-fetched from a network at all.
+    local = Path(a.url)
+    if local.is_file():
+        print(f"[source] local file {local}  ({local.stat().st_size // 1_000_000} MB)")
+        video = local
+    else:
+        video = download_video(a.url)
     clips, hero = make_clips(video, max_clips=a.max_clips, clip_len=a.clip_len,
                              peak_pos=a.peak_pos, layout=a.layout, caption=a.caption,
                              subs=a.subtitles, cap_size=a.cap_size,
