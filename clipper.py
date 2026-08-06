@@ -283,7 +283,8 @@ def _refine_start(energy: np.ndarray, nominal: int, peak: int,
     return max(cands, key=lambda s: (float(energy[s]), -abs(s - nominal)))
 
 
-def find_hype_moments(video: Path, clip_len: int, top_n: int, peak_pos: float) -> list[float]:
+def find_hype_moments(video: Path, clip_len: int, top_n: int,
+                      peak_pos: float) -> tuple[list[float], int]:
     import librosa
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
@@ -297,6 +298,17 @@ def find_hype_moments(video: Path, clip_len: int, top_n: int, peak_pos: float) -
     n = len(y) // sr
     if n == 0:
         sys.exit("[error] audio track too short or empty.")
+    # `n` is the authoritative length, and it is the ONLY one that matters here:
+    # every window below is rejected unless `start + clip_len <= n`. It is not
+    # the container's duration — ffprobe reports 30.000000 for a clip whose
+    # decoded audio is 29.967s, which floors to 29. A caller clamping against
+    # ffprobe therefore passed clip_len=30, every window was rejected, and the
+    # render "succeeded" with zero clips. Clamping anywhere but here is clamping
+    # against a different number than the test that follows.
+    if clip_len > n:
+        print(f"[detect] clip length {clip_len}s exceeds the {n}s of audio "
+              f"in this source — using {n}s")
+        clip_len = n
     energy = np.sqrt(np.mean(y[:n * sr].reshape(n, sr) ** 2, axis=1))
     smoothed = np.convolve(energy, np.ones(5) / 5, mode="same")
 
@@ -314,7 +326,9 @@ def find_hype_moments(video: Path, clip_len: int, top_n: int, peak_pos: float) -
             break
     chosen.sort()
     print(f"[detect] {len(chosen)} moments at {[f'{t/60:.1f}min' for t in chosen]}")
-    return chosen
+    # The length comes back with the moments because it may have been clamped,
+    # and the caller has to cut at the same length these windows were chosen for.
+    return chosen, clip_len
 
 
 # ── 3. motion-aware crop + caption/subtitle compositing ──────────────────────
@@ -2113,16 +2127,12 @@ def make_clips(video: Path, *, max_clips=5, clip_len=30, peak_pos=0.72, layout="
                                 cap_size=cap_size, title=title, platform=platform,
                                 progress=progress, ai_meta=ai_meta, endcard=endcard,
                                 translate=translate)
-    # A source shorter than the requested clip length yields NOTHING at all:
-    # find_hype_moments rejects every window whose `start + clip_len` runs past
-    # the end, so a 30s Twitch clip asked for 45s clips returns zero moments and
-    # the render "succeeds" with an empty clips/ directory. Clamp instead — the
-    # whole source becomes the clip, which is what a short source wants anyway.
-    dur = int(_duration(video))
-    if dur and clip_len > dur:
-        print(f"[clip] source is only {dur}s — clamping clip length from {clip_len}s")
-        clip_len = max(5, dur)
-    moments = find_hype_moments(video, clip_len, max_clips, peak_pos)
+    # A source shorter than the requested clip length would otherwise yield
+    # NOTHING: every window runs past the end and is rejected, so a 30s Twitch
+    # clip asked for 45s clips returns zero moments and the render "succeeds"
+    # with an empty clips/. find_hype_moments clamps and says what it used —
+    # the whole source becomes the clip, which is what a short source wants.
+    moments, clip_len = find_hype_moments(video, clip_len, max_clips, peak_pos)
     clips = []
     for i, t in enumerate(moments, 1):
         clips.append(cut_clip(video, t, clip_len, i, layout, caption, subs, dims,
@@ -2215,7 +2225,8 @@ def make_sample(video: Path, at: float | None = None) -> list[Path]:
     SAMPLE_ZOOMS punch-in levels."""
     dims = _dims(video)
     src_w, src_h = dims
-    start = at if at is not None else find_hype_moments(video, SAMPLE_DUR, 1, 0.5)[0]
+    # [0] picks the moments out of (moments, clip_len); [0] again is the first one.
+    start = at if at is not None else find_hype_moments(video, SAMPLE_DUR, 1, 0.5)[0][0]
     base_w = min(int(src_h * 9 / 16), src_w)
     outdir = CLIPS_DIR / "samples"
     outdir.mkdir(parents=True, exist_ok=True)
