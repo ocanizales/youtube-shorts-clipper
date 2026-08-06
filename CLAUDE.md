@@ -4,6 +4,11 @@ League-of-Legends YouTube Shorts auto-clipper: yt-dlp download → audio-spike
 highlight detection → ffmpeg 9:16 cut with motion tracking and Whisper captions.
 CLI (`clipper.py`) + Flask web app.
 
+**Three sources, one positional argument.** `clipper.py <source>` takes a YouTube
+URL, a Twitch URL (VOD or clip — yt-dlp handles the host, nothing here is
+YouTube-specific), or a **path to a local video file**, which is how an uploaded
+video gets in. `Path(source).is_file()` decides; only the miss is downloaded.
+
 ## Reference notes (read before touching captions or descriptions)
 - `docs/reference/lol-database.md` — game, pro scene, T1 roster. The machine-
   readable half is `lol_kb.py`; **a roster change edits both.**

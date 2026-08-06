@@ -1,7 +1,29 @@
 # HANDOFF — youtube-shorts-clipper
-_Last updated: 2026-08-01 (four framings: whole-video 16:9 + facecam restored). Update me before every session end._
+_Last updated: 2026-08-06 (three sources: YouTube, Twitch, uploaded file). Update me before every session end._
 
 ## Current state
+- **2026-08-06 (the source is no longer only a YouTube URL):**
+
+  `clipper.py` now takes **any of three sources** in the same positional slot:
+  a YouTube URL, a Twitch URL, or **a path to a local video file**. The local
+  branch is the `--sample` idiom promoted to the main path — `Path(a.url).is_file()`
+  decides, and only the miss goes to `download_video`. Nothing about downloading
+  changed for Twitch: `FMT`/`FMT_SORT` were already host-agnostic and yt-dlp
+  handles twitch.tv natively (verified on a real clip: 1920x1080, so the
+  1080p-always rule holds there too).
+
+  **The clamp is the part that mattered.** A Twitch *clip* is usually 30–60s,
+  and `find_hype_moments` rejects every window whose `start + clip_len` runs past
+  the end — so a 40s source asked for 45s clips returned **zero** moments and the
+  render "succeeded" with an empty `clips/`. `make_clips` now clamps `clip_len`
+  to the source duration and says so. Generalises: a filter that can reject
+  *everything* needs a floor, or it reports success for doing nothing.
+
+  The dashboard's `/clipper` page is where this is actually used — it has a
+  source switcher (link vs upload) and stages uploads itself; see
+  `project-dashboard/app.py` (`clip_upload`, `upload_path`, `_reap_uploads`).
+  The clipper is handed a path and never learns a file was uploaded.
+
 - **2026-08-01 (the framing menu is now exactly four, and one of them is landscape):**
 
   **`clipper.LAYOUTS = ("full", "whole", "split", "zoom")`** and it is now the
