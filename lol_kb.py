@@ -346,6 +346,25 @@ AMBIGUOUS_TEAM_FORMS = frozenset({
     "Liquid", "MAD", "Excel", "KOI", "GEN", "Vitality", "Heretics", "Rogue",
 })
 
+# Curating that set by hand was the actual defect, not a gap in it. Every org
+# also carries a 2-3 letter tag, and a hand-list of "ordinary words" will never
+# think to include `BRO` — so a streamer saying "bro I don't even know" was
+# detected as OK BRION, briefed to the model as "LCK organisation", and
+# published as "OK BRION takes on Sp Az in an intense LCK match". `DIG` and
+# `FLY` reproduce it verbatim (Dignitas, FlyQuest).
+#
+# So the rule is derived rather than listed: a short tag is never enough on its
+# own. Real esports clips are unaffected because they clear both signals easily
+# — casters say "baron"/"dragon"/"LCK" constantly (context) and Whisper writes a
+# recognised tag in caps (capitalisation). What it costs is the one case that
+# should cost: a tag shouted into an otherwise contextless stream.
+_SHORT_TAG_MAX = 3
+
+
+def _ambiguous_team_surface(surface: str) -> bool:
+    """True if `surface` may not attribute a clip on its own evidence."""
+    return len(surface) <= _SHORT_TAG_MAX or surface in AMBIGUOUS_TEAM_FORMS
+
 # `Doran` is both a T1 top laner and the starting-item line every caster says a
 # dozen times a game. The possessive is the tell: "Doran's Blade" is never the
 # player, and the apostrophe is not a word character so the plain boundary match
@@ -600,7 +619,7 @@ def detect_entities(text: str) -> dict[str, list[str]]:
         for surface in (team, *info["aka"]):
             if not seen(surface):
                 continue
-            if surface in AMBIGUOUS_TEAM_FORMS and \
+            if _ambiguous_team_surface(surface) and \
                not (ctx and _capitalised_in(text, surface)):
                 continue
             found["teams"].append(team)
@@ -665,8 +684,19 @@ def context_brief(text: str = "", limit: int = 700) -> str:
 
     Only the entities this clip actually mentions — a 3B model given the whole
     knowledge base writes about the knowledge base instead of the clip.
+
+    NOTHING is briefed about a clip that is not recognisably League commentary.
+    That gate matters more than it looks, because `ungrounded_names` checks the
+    model's output against this briefing: whatever lands here is, by definition,
+    a name the model is then allowed to publish. Deriving the briefing from a
+    detection and then validating against the briefing verifies nothing — one
+    false positive becomes a licensed claim. The transcript has to earn a
+    briefing first, and a clip with no League vocabulary in it never does.
     """
-    ents = detect_entities(text or "")
+    text = text or ""
+    if not has_context(text):
+        return ""
+    ents = detect_entities(text)
     lines: list[str] = []
     for ign in ents["players"][:4]:
         name, role, team, _ = PLAYERS[ign]
@@ -800,7 +830,23 @@ def ungrounded_names(text: str, *sources: str) -> list[str]:
     for canon, surfaces in entity_surface_forms().items():
         if canon in AMBIGUOUS_IGNS:
             continue
-        if any(_mentions(text, s) for s in surfaces) and \
-           not any(_mentions(src, s) for s in surfaces):
+        if any(_names_entity(text, s) for s in surfaces) and \
+           not any(_names_entity(src, s) for s in surfaces):
             out.append(canon)
     return sorted(out)
+
+
+def _names_entity(text: str, surface: str) -> bool:
+    """True if `text` uses `surface` to mean the org, not as an ordinary word.
+
+    `_mentions` lowercases both sides, which makes "bro I don't even know" read
+    as a mention of OK BRION. That is wrong on both sides of the grounding check
+    and in opposite directions: on the source side a filler word GROUNDS an
+    invented team, and on the output side an innocent "bro" in a description
+    gets FLAGGED as naming one. Short tags therefore carry the same
+    capitalisation requirement `detect_entities` puts on them; full names and
+    long aliases are unambiguous and stay case-insensitive.
+    """
+    if _ambiguous_team_surface(surface):
+        return _capitalised_in(text, surface)
+    return _mentions(text, surface)

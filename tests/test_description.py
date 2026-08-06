@@ -138,6 +138,30 @@ def test_every_shipped_layout_still_builds_a_filter_graph():
         assert vf and "scale=" in vf, layout
 
 
+# ── published text stays publishable ─────────────────────────────────────────
+# The commentary is unscripted speech. A shipped clip's caption read "Fucked
+# comeback" because the raw first phrase became the headline unchecked.
+def test_profanity_is_detected_on_word_boundaries():
+    assert c.profane_words("Fucked comeback from a shitty start") == \
+        ["fucked", "shitty"]
+
+
+def test_ordinary_words_containing_short_swears_are_not_flagged():
+    """'classic' and 'assist' must not trip the filter — a false positive here
+    silently rewrites good metadata."""
+    assert c.profane_words("A classic assist, he passed the cocktail") == []
+
+
+def test_strip_profanity_keeps_the_rest_of_the_phrase():
+    assert c.strip_profanity("Fucked comeback") == "comeback"
+
+
+def test_strip_profanity_returns_empty_when_that_was_all_there_was():
+    """Empty is the signal write_metadata needs to fall back to the base title
+    rather than publish a blank headline."""
+    assert c.strip_profanity("fuck fuck") == ""
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

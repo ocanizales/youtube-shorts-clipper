@@ -126,6 +126,40 @@ def test_ordinary_english_is_not_a_team_either():
     assert ents["teams"] == [], "a cooking video was attributed to Team Liquid"
 
 
+# Cause 3: the ordinary-word guard was a hand-curated list, so it covered the
+# words someone thought of and none of the 2-3 letter org tags. A solo-queue
+# stream saying "bro" was published as "OK BRION takes on Sp Az in an intense
+# LCK match" — the clip had no match, no LCK, and no BRION in it.
+def test_short_org_tags_do_not_attribute_a_contextless_clip():
+    for filler, org in (("bro", "OK BRION"), ("dig", "Dignitas"),
+                        ("fly", "FlyQuest")):
+        line = f"{filler} I don't even know what to do here, hold on"
+        assert kb.detect_entities(line)["teams"] == [], \
+            f"'{filler}' was attributed to {org}"
+
+
+def test_short_org_tag_still_counts_with_context_and_capitalisation():
+    """The guard must not cost the real orgs their tags."""
+    ents = kb.detect_entities("BRO with the baron steal, DIG take the dragon "
+                              "and the LCK crowd erupts")
+    assert "OK BRION" in ents["teams"] and "Dignitas" in ents["teams"]
+
+
+# A briefing derived from a detection cannot also be the thing that validates
+# the detection: `ungrounded_names` treats whatever reaches the brief as a name
+# the model may publish, so one false positive licenses itself.
+def test_no_briefing_without_league_context():
+    assert kb.context_brief("bro I don't even know what to do here") == ""
+
+
+def test_briefing_cannot_ground_a_name_the_clip_never_supported():
+    sq = "bro I don't even know what to do here, hold on, do that"
+    brief = kb.context_brief(sq)
+    bad = kb.ungrounded_names("OK BRION takes on Sp Az in an intense LCK match",
+                              sq, brief)
+    assert "OK BRION" in bad, "the briefing laundered an invented team"
+
+
 def test_capitalised_ambiguous_ign_still_counts_in_a_league_clip():
     """The guard must not cost us the real players — Bang and Wolf are T1."""
     ents = kb.detect_entities("Bang steps up for the pentakill, Wolf lands the "

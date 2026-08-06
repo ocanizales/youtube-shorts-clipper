@@ -631,7 +631,7 @@ def caption_anchor(layout, dims) -> tuple[int, int]:
 
 def build_vf(layout, dims, crop_x, ass_path, caption, cap_size, cap_an, cap_margin,
              sendcmd=None, crop_w=None, suffix="", endcard=None, endcard_from=None,
-             facecam=None) -> str:
+             facecam=None, facecam_cmd=None) -> str:
     """Build the reframing filter chain for one segment, onto `canvas(layout)`.
 
     Every framing but `whole` targets the 1080x1920 vertical Short; `whole`
@@ -661,8 +661,13 @@ def build_vf(layout, dims, crop_x, ass_path, caption, cap_size, cap_an, cap_marg
     if layout == "split":                    # facecam on top, tracked gameplay below
         fx, fy, fw, fh = facecam
         top_h, bot_h, gw = split_geometry(dims)
+        # Named `crop@face` so a sendcmd script can move it: the webcam is not in
+        # a fixed place for the whole clip when the stream switches scenes. Only
+        # x and y are ever commanded — w and h decide the frame size the vstack
+        # below is built around, and a chain whose frame size changes mid-stream
+        # does not survive the stack.
         vf = (f"split=2[cam{s}][pf{s}];"
-              f"[cam{s}]crop={fw}:{fh}:{fx}:{fy},"
+              f"[cam{s}]crop@face{s}=w={fw}:h={fh}:x={fx}:y={fy},"
               f"scale={Wc}:{top_h}:force_original_aspect_ratio=increase:flags={SCALE_FLAGS},"
               f"crop={Wc}:{top_h}[face{s}];"
               # The gameplay panel is a full-height window that PANS with the
@@ -709,6 +714,12 @@ def build_vf(layout, dims, crop_x, ass_path, caption, cap_size, cap_an, cap_marg
         else:                                # production: full-height 9:16 slice
             cw, ch, cy = min(int(src_h * 9 / 16), src_w), src_h, 0
         vf = f"{dyn}=w={cw}:h={ch}:x={crop_x}:y={cy},scale={W}:{H}:flags={SCALE_FLAGS}"
+    if facecam_cmd:                          # feed crop@face's x/y live -> follows the webcam
+        # Prepended before the gameplay tracker's own sendcmd so both end up
+        # ahead of the graph they drive; sendcmd is a pass-through, so two of
+        # them in series is just two sets of commands on the same timeline.
+        p = str(facecam_cmd).replace("\\", "/").replace(":", R"\:")
+        vf = f"sendcmd=f='{p}',{vf}"
     if sendcmd:                              # feed crop@dyn's x live -> a smooth pan
         p = str(sendcmd).replace("\\", "/").replace(":", R"\:")
         vf = f"sendcmd=f='{p}',{vf}"
@@ -896,16 +907,35 @@ def make_dynamic_captions(clip: Path, an: int, margin_v: int, fontsize: int,
     return ass, hook, transcript
 
 
-def detect_facecam(video: Path, start: float, dur: int, src_w: int, src_h: int):
-    """
-    Best-effort: find a streamer facecam box via face detection on sampled frames.
-    Returns (x, y, w, h) in source pixels, or None. Expands the detected face to a
-    webcam-sized box. Requires opencv (cv2).
+# ── facecam: finding it, and following it ────────────────────────────────────
+# A single box for the whole clip was the original design and it does not
+# survive contact with a real stream. Streamers switch scenes — webcam-large
+# while they talk, game-large in champion select — so the median box is aimed at
+# the webcam for part of the clip and at a corner of the game client for the
+# rest. Measured on short_01_94s.mp4: face at t=1s and t=20s, game client at
+# t=6s and t=14s, from one fixed rectangle.
+#
+# So the box moves. It is sampled like the gameplay pan is sampled and driven by
+# the same sendcmd primitive, with one difference that matters: only x and y are
+# animated. The crop's WIDTH AND HEIGHT MUST STAY CONSTANT — they set the output
+# frame size, and a filter chain whose frame size changes mid-stream will not
+# vstack. Size is therefore fixed once from the median detection and only the
+# position follows.
+FACECAM_FPS        = 2      # face-detection sampling rate (Haar is ~15ms/frame here)
+FACECAM_SNAP_FRAC  = 0.10   # a jump beyond this frac of src_w is a scene change: cut
+FACECAM_STEP_FRAC  = 0.30   # otherwise follow at up to this frac of src_w per second
+FACECAM_DEAD_FRAC  = 0.01   # jitter under this frac of src_w does not move the box
+FACECAM_EXPAND     = (2.4, 2.8)   # face box -> webcam box, (horizontal, vertical)
+FACECAM_DW, FACECAM_DH = 640, 360  # detection resolution; boxes scale back to source
 
-    Deliberately conservative — it demands a face in at least a third of the
-    sampled seconds and takes the MEDIAN box, because a single frame's false
-    positive would frame a third of the Short on a wall texture. When it returns
-    None the caller falls back to `full`; a wrong facecam is far worse than none.
+
+def _facecam_samples(video: Path, start: float, dur: int):
+    """(times, boxes) of the largest face per sampled frame, in DETECTION px.
+
+    `boxes[i]` is (x, y, w, h) or None when nothing was found at `times[i]`.
+    Returns (None, None) when face detection is unavailable — an empty result
+    would be indistinguishable from "looked and found nobody", and those two
+    cases deserve different messages.
     """
     try:
         import cv2
@@ -914,42 +944,154 @@ def detect_facecam(video: Path, start: float, dur: int, src_w: int, src_h: int):
         # and the only symptom is a framing the user did not choose.
         print("[split] opencv missing — no face detection available "
               "(pip install opencv-python-headless)")
-        return None
+        return None, None
     cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    dw, dh = 640, 360
+    dw, dh = FACECAM_DW, FACECAM_DH
     raw = subprocess.run(
         [_FFMPEG, "-ss", str(start), "-i", str(video), "-t", str(dur),
-         "-vf", f"fps=1,scale={dw}:{dh}", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"],
+         "-vf", f"fps={FACECAM_FPS},scale={dw}:{dh}",
+         "-pix_fmt", "bgr24", "-f", "rawvideo", "-"],
         capture_output=True).stdout
     nf = len(raw) // (dw * dh * 3)
     if nf == 0:
-        return None
+        return np.array([]), []
     frames = np.frombuffer(raw[:nf * dw * dh * 3], np.uint8).reshape(nf, dh, dw, 3)
 
-    boxes = []
+    boxes: list = []
     for f in frames:
         gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
         faces = cascade.detectMultiScale(gray, 1.1, 5, minSize=(40, 40))
-        if len(faces):
-            boxes.append(max(faces, key=lambda b: b[2] * b[3]))  # largest face
-    if len(boxes) < max(2, nf // 3):   # need consistent detections
-        return None
+        boxes.append(max(faces, key=lambda b: b[2] * b[3]) if len(faces) else None)
+    times = np.arange(nf, dtype=float) / FACECAM_FPS
+    return times, boxes
 
-    fx, fy, fw, fh = np.median(np.array(boxes), axis=0)
-    # expand face -> webcam box, scale back to source resolution
-    sx, sy = src_w / dw, src_h / dh
-    cx, cy = (fx + fw / 2) * sx, (fy + fh / 2) * sy
-    bw, bh = fw * sx * 2.4, fh * sy * 2.8
-    x, y = cx - bw / 2, cy - bh / 2
-    # Floor everything to an even number — yuv420p chroma wants even crop offsets
-    # and sizes, and flooring (rather than _even's round-to-nearest) can never
-    # push the box past the edge of the frame it was just clamped inside.
-    x = int(max(0, min(x, src_w - bw))) // 2 * 2
-    y = int(max(0, min(y, src_h - bh))) // 2 * 2
-    bw = int(min(bw, src_w - x)) // 2 * 2
-    bh = int(min(bh, src_h - y)) // 2 * 2
-    return x, y, bw, bh
+
+def _facecam_box_size(boxes, src_w: int, src_h: int) -> tuple[int, int]:
+    """Fixed (w, h) of the webcam crop, from the median detected face."""
+    found = np.array([b for b in boxes if b is not None], dtype=float)
+    sx, sy = src_w / FACECAM_DW, src_h / FACECAM_DH
+    fw, fh = float(np.median(found[:, 2])), float(np.median(found[:, 3]))
+    ex, ey = FACECAM_EXPAND
+    bw = min(int(fw * sx * ex) // 2 * 2, src_w // 2 * 2)
+    bh = min(int(fh * sy * ey) // 2 * 2, src_h // 2 * 2)
+    return max(2, bw), max(2, bh)
+
+
+def _facecam_enough(boxes, nf: int) -> bool:
+    """The original conservatism, unchanged: a face in at least a third of the
+    samples. A wrong facecam is far worse than none, and the caller's fallback
+    (`full`) is a framing that always works."""
+    return sum(b is not None for b in boxes) >= max(2, nf // 3)
+
+
+def detect_facecam(video: Path, start: float, dur: int, src_w: int, src_h: int):
+    """
+    Best-effort: find a streamer facecam box via face detection on sampled frames.
+    Returns (x, y, w, h) in source pixels, or None. Expands the detected face to a
+    webcam-sized box. Requires opencv (cv2).
+
+    The STATIC answer — the median box over the window. `facecam_track` is what
+    the split layout renders with; this stays because a short window (the cold-
+    open teaser) has too few samples to be worth animating, and because it is
+    the honest one-box summary when a caller just wants "where is the webcam".
+    """
+    times, boxes = _facecam_samples(video, start, dur)
+    if boxes is None or len(boxes) == 0 or not _facecam_enough(boxes, len(boxes)):
+        return None
+    bw, bh = _facecam_box_size(boxes, src_w, src_h)
+    found = np.array([b for b in boxes if b is not None], dtype=float)
+    sx, sy = src_w / FACECAM_DW, src_h / FACECAM_DH
+    cx = float(np.median(found[:, 0] + found[:, 2] / 2)) * sx
+    cy = float(np.median(found[:, 1] + found[:, 3] / 2)) * sy
+    return _facecam_clamp(cx, cy, bw, bh, src_w, src_h) + (bw, bh)
+
+
+def _facecam_clamp(cx: float, cy: float, bw: int, bh: int,
+                   src_w: int, src_h: int) -> tuple[int, int]:
+    """Centre -> top-left, clamped inside the frame and floored to even.
+
+    Flooring rather than rounding: `_even` rounds to nearest and could push a
+    box that was just clamped to the edge back past it, which fails the render
+    outright instead of looking slightly wrong.
+    """
+    x = int(max(0, min(cx - bw / 2, src_w - bw))) // 2 * 2
+    y = int(max(0, min(cy - bh / 2, src_h - bh))) // 2 * 2
+    return x, y
+
+
+def facecam_track(video: Path, start: float, dur: int, src_w: int, src_h: int):
+    """Facecam box that FOLLOWS the webcam. Returns ((x, y, w, h), script|None).
+
+    The box is the starting position and the fixed crop size; `script` is a
+    sendcmd file driving `crop@face`'s x and y, or None when the webcam never
+    really moves (a stream with one static scene — most of them) so the caller
+    renders a plain static crop exactly as before.
+
+    Returns (None, None) when there is no reliable face, which the caller turns
+    into the `full` fallback.
+    """
+    times, boxes = _facecam_samples(video, start, dur)
+    if boxes is None or len(boxes) == 0 or not _facecam_enough(boxes, len(boxes)):
+        return None, None
+    bw, bh = _facecam_box_size(boxes, src_w, src_h)
+    sx, sy = src_w / FACECAM_DW, src_h / FACECAM_DH
+
+    snap = FACECAM_SNAP_FRAC * src_w
+    dead = FACECAM_DEAD_FRAC * src_w
+    max_step = FACECAM_STEP_FRAC * src_w / FACECAM_FPS
+
+    # Seed on the first real detection so the clip does not open on a hold-over
+    # from nothing, then walk forward holding through the gaps.
+    first = next(b for b in boxes if b is not None)
+    cur = np.array([(first[0] + first[2] / 2) * sx, (first[1] + first[3] / 2) * sy])
+    xs, ys = [], []
+    for b in boxes:
+        if b is not None:
+            tgt = np.array([(b[0] + b[2] / 2) * sx, (b[1] + b[3] / 2) * sy])
+            d = float(np.hypot(*(tgt - cur)))
+            if d > snap:
+                # A scene change is a cut, not a journey. Sliding the crop across
+                # the frame to catch up would put the viewer on a slow pan over
+                # the game client — worse than the wrong box it is correcting.
+                cur = tgt
+            elif d > dead:
+                cur = cur + (tgt - cur) * (min(d, max_step) / d)
+        # b is None: hold. A dropped detection is usually a blink or a head turn,
+        # and holding is right for both.
+        x, y = _facecam_clamp(cur[0], cur[1], bw, bh, src_w, src_h)
+        xs.append(x); ys.append(y)
+
+    box0 = (xs[0], ys[0], bw, bh)
+    if float(np.ptp(xs)) < 2.0 and float(np.ptp(ys)) < 2.0:
+        return box0, None                       # static scene: no script needed
+    script = CLIPS_DIR / f".face_{int(start)}_{bw}.cmd"
+    _write_facecam_sendcmd(times, np.array(xs, float), np.array(ys, float), script)
+    print(f"[split] facecam follows the scene "
+          f"(x {min(xs)}-{max(xs)}, y {min(ys)}-{max(ys)})")
+    return box0, script
+
+
+def _write_facecam_sendcmd(times: np.ndarray, xs: np.ndarray, ys: np.ndarray,
+                           path: Path) -> Path:
+    """sendcmd script driving `crop@face`'s x and y together.
+
+    Densified to CMD_FPS for the same reason `_write_sendcmd` does it: sendcmd
+    steps rather than interpolates, so the smoothness has to be in the script.
+    Both coordinates are issued in one interval — two intervals at the same
+    timestamp would be a diagonal made of two axis-aligned jumps.
+    """
+    if len(times) >= 2:
+        dense_t = np.arange(float(times[0]), float(times[-1]), 1.0 / CMD_FPS)
+        dense_x = np.interp(dense_t, times, xs)
+        dense_y = np.interp(dense_t, times, ys)
+    else:
+        dense_t, dense_x, dense_y = times, xs, ys
+    lines = [f"{t:.3f} crop@face x {int(round(x)) // 2 * 2}, "
+             f"crop@face y {int(round(y)) // 2 * 2};"
+             for t, x, y in zip(dense_t, dense_x, dense_y)]
+    path.write_text("\n".join(lines) + "\n")
+    return path
 
 
 def has_existing_captions(video: Path, start: float, dur: int, dims) -> bool:
@@ -1095,6 +1237,42 @@ _META_SCHEMA = {
     "required": ["title", "hook", "description", "hashtags"],
 }
 
+# The transcript is unscripted speech, so it swears; the title and the caption
+# are the two lines YouTube shows before anyone taps. A shipped clip was
+# captioned "Fucked comeback" because the model echoed the commentary it was
+# handed and nothing downstream looked. Profanity in a Short's title is also an
+# ad-suitability problem, not only a taste one.
+#
+# Word-boundary matched, not substring: "classic" and "assist" contain shorter
+# swears and a filter that trips on them is worse than no filter.
+PROFANITY = frozenset({
+    "fuck", "fucks", "fucked", "fucking", "fucker", "shit", "shits",
+    "shitty", "bitch", "bitches", "cunt", "dick", "cock", "bastard",
+    "asshole", "motherfucker", "nigga", "retard", "retarded", "whore", "slut",
+})
+
+
+def profane_words(text: str) -> list[str]:
+    """Which PROFANITY terms `text` actually uses, in order, deduplicated."""
+    out: list[str] = []
+    for w in re.findall(r"[A-Za-z]+", text or ""):
+        lw = w.lower()
+        if lw in PROFANITY and lw not in out:
+            out.append(lw)
+    return out
+
+
+def strip_profanity(text: str) -> str:
+    """Drop profane words and tidy the whitespace/punctuation they leave.
+
+    Used on the NON-AI fallback headline, which is raw transcribed speech and
+    has no second draft to fall back to — unlike the model's answer, which gets
+    told what it did wrong and asked again.
+    """
+    kept = [w for w in (text or "").split()
+            if re.sub(r"[^A-Za-z]", "", w).lower() not in PROFANITY]
+    return re.sub(r"\s{2,}", " ", " ".join(kept)).strip(" ,.-—").strip()
+
 
 def _ollama_metadata(transcript: str, idx: int) -> dict | None:
     """Title/hook/description/tags for one clip via the local Ollama instance.
@@ -1109,7 +1287,7 @@ def _ollama_metadata(transcript: str, idx: int) -> dict | None:
     import urllib.request
     brief = lol_kb.context_brief(transcript)
 
-    def _prompt(scold: list[str] | None = None) -> str:
+    def _prompt(scold: list[str] | None = None, swore: bool = False) -> str:
         # The briefing is what the model is ALLOWED to know. When it is empty the
         # old prompt still said "lead with the player or team name" and "use the
         # names from the briefing", so a clip the KB could not identify asked a 3B
@@ -1126,6 +1304,11 @@ def _ollama_metadata(transcript: str, idx: int) -> dict | None:
             retry = ("\nYour previous answer named " + ", ".join(scold) +
                      ", which appears nowhere in the commentary or the briefing. "
                      "That is invented. Rewrite without those names.\n")
+        if swore:
+            retry += ("\nYour previous answer swore. The commentary is "
+                      "unscripted and does swear, but the title and description "
+                      "are published text — describe what was said without "
+                      "repeating the profanity.\n")
         return (
             "You write YouTube Shorts metadata for League of Legends esports "
             "highlight clips. Spoken commentary from this clip:\n"
@@ -1171,12 +1354,13 @@ def _ollama_metadata(transcript: str, idx: int) -> dict | None:
 
     try:
         scold: list[str] | None = None
+        swore = False
         # Two attempts, then honest fallback. Prompting lowers the invention rate
         # but cannot zero it, and the failure is silent — fluent, confident, wrong.
         # The vocabulary of nameable things is closed, so an ungrounded name is
         # detectable after the fact; see lol_kb.ungrounded_names.
         for attempt in (1, 2):
-            meta = _ask(_prompt(scold))
+            meta = _ask(_prompt(scold, swore))
             if meta is None:
                 return None
             # The hook is checked too, and that is not padding: `write_metadata`
@@ -1186,7 +1370,13 @@ def _ollama_metadata(transcript: str, idx: int) -> dict | None:
             published = f"{meta['title']} {meta['hook']} {meta['description']}"
             bad = (lol_kb.ungrounded_names(published, transcript, brief)
                    + lol_kb.ungrounded_claims(published, transcript, brief))
-            if not bad:
+            # Swearing is checked on the same pass and scolded the same way. It
+            # is not an invention — the commentary really did say it — so it
+            # gets its own sentence in the retry rather than being folded into
+            # "that is invented", which would be a lie the model then reasons
+            # from.
+            swears = profane_words(published)
+            if not bad and not swears:
                 # Tags are dropped individually rather than failing the whole
                 # answer: one invented tag does not make the title wrong.
                 meta["tags"] = [
@@ -1198,9 +1388,12 @@ def _ollama_metadata(transcript: str, idx: int) -> dict | None:
                         "hook": (meta["hook"] or meta["title"])[:120],
                         "description": meta["description"][:800],
                         "tags": meta["tags"]}
-            print(f"[meta {idx}] attempt {attempt} invented {', '.join(bad)}"
+            faults = ([f"invented {', '.join(bad)}"] if bad else []) + \
+                     ([f"swore ({', '.join(swears)})"] if swears else [])
+            print(f"[meta {idx}] attempt {attempt} {' and '.join(faults)}"
                   + (" — retrying" if attempt == 1 else " — using hook title"))
             scold = bad
+            swore = bool(swears)
         return None
     except Exception as ex:
         print(f"[meta {idx}] Ollama unavailable ({ex.__class__.__name__}) — using hook title")
@@ -1233,7 +1426,11 @@ def write_metadata(clip: Path, title_base: str, idx: int, platform: str,
         body = (f"TITLE:\n{title_override or title}\n\nCAPTION:\n{caption}\n\n"
                 f"TAGS:\n{', '.join(meta['tags'])}\n")
     else:
-        headline = (hook or title_base).strip().rstrip(".!?")
+        # `hook` is the first spoken phrase, verbatim. It reaches the title and
+        # the first line of the caption, so it is stripped rather than trusted;
+        # if swearing was all it had, fall back to the run's base title.
+        headline = strip_profanity((hook or "").strip()) or title_base.strip()
+        headline = headline.rstrip(".!?")
         title = f"{headline} 🔥 [{idx}]"
         caption = build_description(headline,
                                     f"{headline} — League of Legends highlight.",
@@ -1741,9 +1938,12 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
     out = CLIPS_DIR / f"short_{idx:02d}_{int(start)}s.mp4"
     src_w, src_h = dims
 
-    facecam = None
+    facecam, face_cmd = None, None
     if layout == "split":
-        facecam = facecam_override or detect_facecam(video, start, dur, src_w, src_h)
+        if facecam_override:
+            facecam = facecam_override           # caller pinned the box; do not track
+        else:
+            facecam, face_cmd = facecam_track(video, start, dur, src_w, src_h)
         if not facecam:                          # no face -> show the whole video instead
             print(f"[clip {idx}] no facecam detected; falling back to full-video layout")
             layout = "full"
@@ -1799,7 +1999,7 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
     vf = build_vf(layout, dims, crop_x, ass_path, caption,
                   cap_size_eff, cap_an, cap_margin, sendcmd=track_cmd,
                   endcard=endcard, endcard_from=max(0.0, dur - ENDCARD_DUR),
-                  facecam=facecam)
+                  facecam=facecam, facecam_cmd=face_cmd)
     # Applied once to the FINISHED stream, so a teaser and the main segment can
     # never end up graded or tagged differently.
     tail = ""
@@ -1834,12 +2034,22 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
                                   crop_w=_track_window(layout, dims))[0]
         # No captions and no headline on the flash; `suffix` keeps its link labels
         # and its crop@dyn instance from colliding with the main segment's (whose
-        # crop@dyn is what the sendcmd script addresses by name). The facecam box
-        # is the one thing it must share: a flash framed on a different crop of
-        # the webcam would read as a cut to a second person.
+        # crop@dyn is what the sendcmd script addresses by name).
+        #
+        # The teaser gets its OWN static facecam box rather than the main
+        # segment's. It is a different moment in the stream — that is the whole
+        # point of a cold open — so the scene there may not be the scene the
+        # main segment opens on, which is exactly the mismatch the tracker
+        # exists to fix. Too short to animate (a second or two, ~2-4 samples),
+        # so it is detected once and held; if that detection fails it falls back
+        # to the main box, which is still better than no facecam panel at all.
+        t_face = facecam
+        if layout == "split" and not facecam_override:
+            t_face = detect_facecam(video, t0, max(1, int(round(t_len))),
+                                    src_w, src_h) or facecam
         tvf = build_vf(layout, dims, t_crop_x, None, None,
                        cap_size_eff, cap_an, cap_margin, suffix="_t",
-                       facecam=facecam)
+                       facecam=t_face)
         fc = (f"[0:v]{tvf}[tv];[1:v]{vf}[mv];"
               f"[tv][mv]concat=n=2:v=1:a=0{tail}[vo];"
               f"[0:a][1:a]concat=n=2:v=0:a=1,{_LOUDNORM}[ao]")
@@ -1857,6 +2067,8 @@ def cut_clip(video, start, dur, idx, layout, caption, subs, dims,
         ass_path.unlink(missing_ok=True)
     if track_cmd:                                # remove the temp sendcmd pan script
         track_cmd.unlink(missing_ok=True)
+    if face_cmd:                                 # ...and the facecam's
+        face_cmd.unlink(missing_ok=True)
     meta = _ollama_metadata(transcript, idx) if (ai_meta and transcript) else None
     write_metadata(out, title, idx, platform, hook, meta,   # title + caption sidecar
                    transcript=transcript, endcard=endcard,
