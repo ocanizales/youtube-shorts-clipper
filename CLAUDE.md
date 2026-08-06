@@ -7,7 +7,12 @@ CLI (`clipper.py`) + Flask web app.
 **Three sources, one positional argument.** `clipper.py <source>` takes a YouTube
 URL, a Twitch URL (VOD or clip — yt-dlp handles the host, nothing here is
 YouTube-specific), or a **path to a local video file**, which is how an uploaded
-video gets in. `Path(source).is_file()` decides; only the miss is downloaded.
+video gets in. `resolve_source()` decides with `Path(source).is_file()`; only the
+miss is downloaded. `--fetch-only` stops right there and prints `[fetch] <path>`
+— "give me the file" without a render. **Every download goes through
+`download_video`**, whoever is asking: `FMT`/`FMT_SORT`, the 1080p rule and the
+`--js-runtimes` plumbing exist in exactly one place, and a second yt-dlp
+invocation elsewhere is how 1080p-always quietly stops being true.
 
 ## Reference notes (read before touching captions or descriptions)
 - `docs/reference/lol-database.md` — game, pro scene, T1 roster. The machine-

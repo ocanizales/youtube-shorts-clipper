@@ -1,7 +1,22 @@
 # HANDOFF — youtube-shorts-clipper
-_Last updated: 2026-08-06 (three sources: YouTube, Twitch, uploaded file). Update me before every session end._
+_Last updated: 2026-08-06 (three sources + `--fetch-only`). Update me before every session end._
 
 ## Current state
+- **2026-08-06 (`--fetch-only`: download the source and stop):**
+
+  There was no way to just *get the file*. `download_video` is only ever step 1
+  of a render and the dashboard deletes what it produced, so "give me that Twitch
+  clip" meant SSH and a hand-written yt-dlp call — with a format selector that
+  would not have matched this repo's, i.e. a silent 1080p regression waiting to
+  happen. `--fetch-only` resolves the source, prints `[fetch] <path>` on its own
+  marked line and exits before the banner and any ffmpeg work.
+
+  The local-file-or-URL decision is now `resolve_source()`, shared by the render
+  path and this one. The marked output line is load-bearing: the dashboard picks
+  the finished file out of yt-dlp's progress stream with it rather than guessing,
+  then moves it somewhere its own cleanup will not eat (`_keep_fetched` in
+  `project-dashboard/app.py`).
+
 - **2026-08-06 (the source is no longer only a YouTube URL):**
 
   `clipper.py` now takes **any of three sources** in the same positional slot:
